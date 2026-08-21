@@ -6,6 +6,15 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		770DED082F8EDB0700A83827 /* QuickPoseCamera in Frameworks */ = {isa = PBXBuildFile; productRef = 770DED072F8EDB0700A83827 /* QuickPoseCamera */; };
+		770DED0A2F8EDB0700A83827 /* QuickPoseCore in Frameworks */ = {isa = PBXBuildFile; productRef = 770DED092F8EDB0700A83827 /* QuickPoseCore */; };
+		770DED0C2F8EDB0700A83827 /* QuickPoseMP-full in Frameworks */ = {isa = PBXBuildFile; productRef = 770DED0B2F8EDB0700A83827 /* QuickPoseMP-full */; };
+		770DED0E2F8EDB0700A83827 /* QuickPoseSwiftUI in Frameworks */ = {isa = PBXBuildFile; productRef = 770DED0D2F8EDB0700A83827 /* QuickPoseSwiftUI */; };
+		770DED122F8EDB0700A83827 /* RealmSwift in Frameworks */ = {isa = PBXBuildFile; productRef = 770DED112F8EDB0700A83827 /* RealmSwift */; };
+		770DED132F8EDB0700A83827 /* RealmSwift in Embed Frameworks */ = {isa = PBXBuildFile; productRef = 770DED112F8EDB0700A83827 /* RealmSwift */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		770DECE92F8ED94800A83827 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -22,6 +31,20 @@
 			remoteInfo = pose;
 		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		770DED142F8EDB0700A83827 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				770DED132F8EDB0700A83827 /* RealmSwift in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		770DECD22F8ED94600A83827 /* pose.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = pose.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -65,6 +88,11 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				770DED0A2F8EDB0700A83827 /* QuickPoseCore in Frameworks */,
+				770DED0C2F8EDB0700A83827 /* QuickPoseMP-full in Frameworks */,
+				770DED082F8EDB0700A83827 /* QuickPoseCamera in Frameworks */,
+				770DED0E2F8EDB0700A83827 /* QuickPoseSwiftUI in Frameworks */,
+				770DED122F8EDB0700A83827 /* RealmSwift in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -114,6 +142,7 @@
 			buildPhases = (
 				770DECCE2F8ED94600A83827 /* Sources */,
 				770DECCF2F8ED94600A83827 /* Frameworks */,
+				770DED142F8EDB0700A83827 /* Embed Frameworks */,
 				770DECD02F8ED94600A83827 /* Resources */,
 			);
 			buildRules = (
@@ -125,6 +154,11 @@
 			);
 			name = pose;
 			packageProductDependencies = (
+				770DED072F8EDB0700A83827 /* QuickPoseCamera */,
+				770DED092F8EDB0700A83827 /* QuickPoseCore */,
+				770DED0B2F8EDB0700A83827 /* QuickPoseMP-full */,
+				770DED0D2F8EDB0700A83827 /* QuickPoseSwiftUI */,
+				770DED112F8EDB0700A83827 /* RealmSwift */,
 			);
 			productName = pose;
 			productReference = 770DECD22F8ED94600A83827 /* pose.app */;
@@ -208,6 +242,10 @@
 			);
 			mainGroup = 770DECC92F8ED94600A83827;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				770DED062F8EDB0700A83827 /* XCRemoteSwiftPackageReference "quickpose-ios-sdk" */,
+				770DED102F8EDB0700A83827 /* XCRemoteSwiftPackageReference "realm-swift" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 770DECD32F8ED94600A83827 /* Products */;
 			projectDirPath = "";
@@ -289,11 +327,14 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7939U2265B;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = pose/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Pose偵測";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.sports";
+				INFOPLIST_KEY_NSCameraUsageDescription = "需要相機以進行即時姿勢與骨架偵測。";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
-				INFOPLIST_KEY_UIMainStoryboardFile = Main;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -320,11 +361,14 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7939U2265B;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = pose/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Pose偵測";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.sports";
+				INFOPLIST_KEY_NSCameraUsageDescription = "需要相機以進行即時姿勢與骨架偵測。";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
-				INFOPLIST_KEY_UIMainStoryboardFile = Main;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -396,7 +440,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
@@ -453,7 +497,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
@@ -470,7 +514,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "my-first-app.poseTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -491,7 +535,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "my-first-app.poseTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -583,6 +627,53 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		770DED062F8EDB0700A83827 /* XCRemoteSwiftPackageReference "quickpose-ios-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/quickpose/quickpose-ios-sdk.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.0.0;
+			};
+		};
+		770DED102F8EDB0700A83827 /* XCRemoteSwiftPackageReference "realm-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/realm/realm-swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 10.44.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		770DED072F8EDB0700A83827 /* QuickPoseCamera */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 770DED062F8EDB0700A83827 /* XCRemoteSwiftPackageReference "quickpose-ios-sdk" */;
+			productName = QuickPoseCamera;
+		};
+		770DED092F8EDB0700A83827 /* QuickPoseCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 770DED062F8EDB0700A83827 /* XCRemoteSwiftPackageReference "quickpose-ios-sdk" */;
+			productName = QuickPoseCore;
+		};
+		770DED0B2F8EDB0700A83827 /* QuickPoseMP-full */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 770DED062F8EDB0700A83827 /* XCRemoteSwiftPackageReference "quickpose-ios-sdk" */;
+			productName = "QuickPoseMP-full";
+		};
+		770DED0D2F8EDB0700A83827 /* QuickPoseSwiftUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 770DED062F8EDB0700A83827 /* XCRemoteSwiftPackageReference "quickpose-ios-sdk" */;
+			productName = QuickPoseSwiftUI;
+		};
+		770DED112F8EDB0700A83827 /* RealmSwift */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 770DED102F8EDB0700A83827 /* XCRemoteSwiftPackageReference "realm-swift" */;
+			productName = RealmSwift;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 770DECCA2F8ED94600A83827 /* Project object */;
 }

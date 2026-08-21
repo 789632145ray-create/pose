@@ -1,0 +1,32 @@
+# Xcode
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Swift Package Manager
+.build/
+Packages/
+Package.pins
+Package.resolved
+
+# 後端獨立 repo（已推至 runpose-backend），勿嵌進 iOS repo
+backend/
+
+# Cursor / 本地工具
+.cursor/
+*.log
+
+# 敏感設定（若將來有本地 override）
+*.local.plist
