@@ -59,7 +59,7 @@ struct AppMenuSheet: View {
 
     private var engineSection: some View {
         Section("偵測引擎") {
-            ForEach(PoseDetectionEngine.allCases) { engine in
+            ForEach(PoseAssessmentEngine.allCases) { engine in
                 AppMenuEngineRow(engine: engine, isSelected: modeStore.engine == engine) {
                     modeStore.engine = engine
                 }
@@ -77,7 +77,7 @@ struct AppMenuSheet: View {
 }
 
 private struct AppMenuEngineRow: View {
-    let engine: PoseDetectionEngine
+    let engine: PoseAssessmentEngine
     let isSelected: Bool
     let onSelect: () -> Void
 

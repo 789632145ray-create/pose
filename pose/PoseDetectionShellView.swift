@@ -2,42 +2,23 @@
 //  PoseDetectionShellView.swift
 //  pose
 //
-//  登入後依使用者選擇顯示 QuickPose SDK 或訓練模型完整管線。
+//  登入後依使用者選擇顯示 QuickPose 原生 overlay、MediaPipe 完整管線，或自訓模型。
 //
 
 import Combine
 import SwiftUI
 
-enum PoseDetectionEngine: String, CaseIterable, Identifiable {
-    case quickPoseSDK = "quickpose"
-    case trainedModel = "trained"
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .quickPoseSDK: return "QuickPose SDK"
-        case .trainedModel: return "訓練模型"
-        }
-    }
-
-    var detail: String {
-        switch self {
-        case .quickPoseSDK:
-            return "官方骨架偵測，即時 FPS 與 overlay"
-        case .trainedModel:
-            return "步態分析、節點資料庫、雲端品質模型"
-        }
-    }
-}
-
 @MainActor
 final class DetectionModeStore: ObservableObject {
-    @AppStorage("poseDetectionEngine") private var engineRaw = PoseDetectionEngine.trainedModel.rawValue
+    @AppStorage("poseDetectionEngine") private var engineRaw = PoseAssessmentEngine.trainedModel.rawValue
 
-    var engine: PoseDetectionEngine {
-        get { PoseDetectionEngine(rawValue: engineRaw) ?? .trainedModel }
-        set { engineRaw = newValue.rawValue }
+    var engine: PoseAssessmentEngine {
+        get { PoseAssessmentEngine.resolved(fromStored: engineRaw) }
+        set {
+            engineRaw = newValue.rawValue
+            newValue.save()
+            objectWillChange.send()
+        }
     }
 }
 
@@ -48,9 +29,9 @@ struct PoseDetectionShellView: View {
     var body: some View {
         Group {
             switch modeStore.engine {
-            case .trainedModel:
+            case .trainedModel, .mediaPipe:
                 PoseDetectionView()
-            case .quickPoseSDK:
+            case .quickPose:
                 QuickPoseBasicDetectionView()
             }
         }
@@ -65,7 +46,7 @@ struct DetectionEnginePickerRow: View {
 
     var body: some View {
         Menu {
-            ForEach(PoseDetectionEngine.allCases) { engine in
+            ForEach(PoseAssessmentEngine.allCases) { engine in
                 Button {
                     modeStore.engine = engine
                 } label: {
@@ -78,7 +59,7 @@ struct DetectionEnginePickerRow: View {
             }
         } label: {
             HStack(spacing: 8) {
-                Image(systemName: modeStore.engine == .quickPoseSDK ? "figure.walk" : "brain.head.profile")
+                Image(systemName: modeStore.engine.systemImage)
                 Text("偵測引擎：\(modeStore.engine.title)")
                     .font(.subheadline.weight(.semibold))
                 Spacer(minLength: 0)
@@ -99,7 +80,7 @@ struct DetectionEngineMenuItems: View {
 
     var body: some View {
         Menu("偵測引擎") {
-            ForEach(PoseDetectionEngine.allCases) { engine in
+            ForEach(PoseAssessmentEngine.allCases) { engine in
                 Button {
                     modeStore.engine = engine
                 } label: {

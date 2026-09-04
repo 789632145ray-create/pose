@@ -2,8 +2,8 @@
 //  PoseDetectionView.swift
 //  pose
 //
-//  相機權限改為「使用者按鈕後才請求」，避免系統不跳對話框；
-//  在授權前不掛載 QuickPoseCameraView，以免相機先被占用導致行為異常。
+//  完整偵測管線（MediaPipe BlazePose Full 規則建議，或自訓模型 /predict）。
+//  相機權限改為「使用者按鈕後才請求」；授權前不掛載 QuickPoseCameraView。
 //
 
 import AVFoundation
@@ -30,6 +30,8 @@ final class QuickPoseEngine: ObservableObject {
 
     var detectionActive = false
     private(set) var loopActive = false
+    /// MediaPipe Full（`.good`）或自訓模型共用完整管線時由此指定模型。
+    var assessmentEngine: PoseAssessmentEngine = .trainedModel
 
     weak var analysisPipeline: PoseAnalysisPipeline?
     var bodyGaitProfile: BodyGaitProfile?
@@ -58,12 +60,34 @@ final class QuickPoseEngine: ObservableObject {
         }
     }
 
-    /// 對齊原生模式：僅在尚未運轉時 start（不用 modelConfig，與 BasicQuickPoseRunner 相同）。
+    /// MediaPipe 使用 BlazePose Full（`.good`）；自訓模型同樣用 Full 骨架再送後端。
     func startLoopIfNeeded() {
         guard !loopActive else { return }
         loopActive = true
 
-        pose.start(features: [.overlay(.wholeBody)]) { [weak self] status, image, _, _, landmarks in
+        let features: [QuickPose.Feature]
+        let modelConfig: QuickPose.ModelConfig
+        switch assessmentEngine {
+        case .mediaPipe:
+            features = [.overlay(.wholeBody), .showPoints()]
+            modelConfig = QuickPose.ModelConfig(
+                detailedFaceTracking: false,
+                detailedHandTracking: false,
+                modelComplexity: .good
+            )
+        case .trainedModel:
+            features = [.overlay(.wholeBody)]
+            modelConfig = QuickPose.ModelConfig(
+                detailedFaceTracking: false,
+                detailedHandTracking: false,
+                modelComplexity: .good
+            )
+        case .quickPose:
+            features = [.overlay(.wholeBody)]
+            modelConfig = QuickPose.ModelConfig()
+        }
+
+        pose.start(features: features, modelConfig: modelConfig) { [weak self] status, image, _, _, landmarks in
             Task { @MainActor in
                 self?.processFrame(status: status, image: image, landmarks: landmarks)
             }
@@ -120,7 +144,9 @@ final class QuickPoseEngine: ObservableObject {
                     issues: advice.issues
                 )
                 isEngineStarting = false
-                onStreamEnqueue?(nodes, ts)
+                if assessmentEngine.usesTrainedModelPredict {
+                    onStreamEnqueue?(nodes, ts)
+                }
                 overlayImage = img
                 fpsText = fps
                 adviceLines = result.lines
@@ -329,6 +355,10 @@ struct PoseDetectionView: View {
         }
     }
 
+    private var assessmentEngine: PoseAssessmentEngine {
+        modeStore.engine
+    }
+
     /// 相機／影片來源切換時強制 remount，確保 onAppear → start 生命週期與原生模式一致。
     private var cameraContentID: String {
         switch detectionSource {
@@ -350,6 +380,7 @@ struct PoseDetectionView: View {
                     lines: summaryLines,
                     qualityResult: videoQualityResult,
                     isAnalyzingQuality: isAnalyzingVideoQuality,
+                    showsModelQuality: assessmentEngine.usesTrainedModelPredict,
                     autoSaved: historySavedForSession,
                     onShowHistory: {
                         showSummary = false
@@ -424,8 +455,12 @@ struct PoseDetectionView: View {
             .ignoresSafeArea()
             .onAppear {
                 refreshCameraGate()
+                syncAssessmentEngine()
                 wireQuickPoseEngineCallbacks()
                 syncBodyGaitProfile()
+            }
+            .onChange(of: modeStore.engine) { _, newEngine in
+                handleAssessmentEngineChange(newEngine)
             }
             .onChange(of: auth.userProfile) { _, _ in
                 syncBodyGaitProfile()
@@ -601,7 +636,7 @@ struct PoseDetectionView: View {
     @MainActor
     private var bottomAdviceSection: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("姿勢建議")
+            Text(assessmentEngine.adviceSectionTitle)
                 .font(.headline)
                 .foregroundStyle(.white)
             ScrollView(.vertical, showsIndicators: false) {
@@ -708,7 +743,10 @@ struct PoseDetectionView: View {
                 } label: {
                     HStack {
                         if isAnalyzingVideoQuality { ProgressView().tint(.white) }
-                        Label("品質辨識與摘要", systemImage: "brain.head.profile")
+                        Label(
+                            assessmentEngine.usesTrainedModelPredict ? "品質辨識與摘要" : "分析摘要",
+                            systemImage: assessmentEngine.usesTrainedModelPredict ? "brain.head.profile" : "text.alignleft"
+                        )
                             .font(.subheadline.weight(.semibold))
                     }
                     .frame(maxWidth: .infinity)
@@ -789,6 +827,7 @@ struct PoseDetectionView: View {
 
     @MainActor
     private func wireQuickPoseEngineCallbacks() {
+        syncAssessmentEngine()
         quickPoseEngine.analysisPipeline = analysisPipeline
         syncBodyGaitProfile()
         quickPoseEngine.onStreamEnqueue = { [stream] nodes, ts in
@@ -796,6 +835,24 @@ struct PoseDetectionView: View {
         }
         quickPoseEngine.onStepEvents = { emitted in
             handle(emitted: emitted)
+        }
+    }
+
+    @MainActor
+    private func syncAssessmentEngine() {
+        quickPoseEngine.assessmentEngine = assessmentEngine
+    }
+
+    @MainActor
+    private func handleAssessmentEngineChange(_ newEngine: PoseAssessmentEngine) {
+        guard newEngine.usesFullDetectionPipeline else { return }
+        let previous = quickPoseEngine.assessmentEngine
+        syncAssessmentEngine()
+        guard previous != newEngine else { return }
+        livePrediction = nil
+        videoQualityResult = nil
+        if quickPoseEngine.loopActive {
+            quickPoseEngine.restartLoop()
         }
     }
 
@@ -893,7 +950,8 @@ struct PoseDetectionView: View {
     @MainActor
     private func buildSummaryLinesForHistory() -> [String] {
         var lines = analysisPipeline.videoSummary()
-        if let pred = videoQualityResult ?? livePrediction,
+        if assessmentEngine.usesTrainedModelPredict,
+           let pred = videoQualityResult ?? livePrediction,
            pred.note == nil,
            let label = pred.label {
             let pct = Int(pred.confidencePercent)
@@ -948,6 +1006,7 @@ struct PoseDetectionView: View {
     @MainActor
     private func startStreaming() {
         livePrediction = nil
+        guard assessmentEngine.usesTrainedModelPredict else { return }
         let source = currentSourceLabel
         streamLoopTask?.cancel()
         streamLoopTask = Task {
@@ -1075,8 +1134,15 @@ struct PoseDetectionView: View {
     private func analyzeVideoQualityAndShowSummary() {
         summaryLines = analysisPipeline.videoSummary()
         videoQualityResult = nil
-        isAnalyzingVideoQuality = true
         showSummary = true
+
+        guard assessmentEngine.usesTrainedModelPredict else {
+            isAnalyzingVideoQuality = false
+            autoSaveSummaryToHistory()
+            return
+        }
+
+        isAnalyzingVideoQuality = true
 
         let sessionID = dbSessionID
         Task {
@@ -1247,9 +1313,9 @@ struct PoseDetectionView: View {
 
     private var poseStatusBadge: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Pose")
+            Text(assessmentEngine.hudBadgeTitle)
                 .font(.caption.weight(.bold))
-                .foregroundStyle(.orange)
+                .foregroundStyle(assessmentEngine == .mediaPipe ? .mint : .orange)
             Text(quickPoseEngine.fpsText)
                 .font(.system(size: 16, weight: .semibold, design: .rounded))
                 .foregroundStyle(.white)
@@ -1284,22 +1350,29 @@ struct PoseDetectionView: View {
     @ViewBuilder
     private var qualityBadgeIfNeeded: some View {
         if case .video = detectionSource {
-            Text("影片偵測中")
+            Text(assessmentEngine == .mediaPipe ? "MediaPipe 影片偵測中" : "影片偵測中")
                 .font(.caption2.weight(.bold))
                 .foregroundStyle(.purple)
-            if let result = videoQualityResult ?? livePrediction {
+            if assessmentEngine.usesTrainedModelPredict, let result = videoQualityResult ?? livePrediction {
                 videoQualityBadge(result, compact: true)
             }
-        } else if let pred = livePrediction {
+        } else if assessmentEngine.usesTrainedModelPredict, let pred = livePrediction {
             videoQualityBadge(pred, compact: true)
         }
     }
 
     private var quickPoseVersionLabel: some View {
-        Text("QuickPose v\(quickPoseEngine.pose.quickPoseVersion())")
-            .font(.caption2)
-            .foregroundStyle(.white.opacity(0.7))
-            .padding(8)
+        VStack(alignment: .trailing, spacing: 2) {
+            if assessmentEngine == .mediaPipe {
+                Text("MediaPipe \(quickPoseEngine.pose.modelWeight())")
+                    .font(.caption2)
+                    .foregroundStyle(.mint.opacity(0.9))
+            }
+            Text("QuickPose v\(quickPoseEngine.pose.quickPoseVersion())")
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.7))
+        }
+        .padding(8)
     }
 
     // MARK: - QuickPose
@@ -1329,9 +1402,9 @@ struct PoseDetectionView: View {
         quickPoseEngine.fpsText = "FPS: —（已暫停）"
         switch detectionSource {
         case .liveCamera:
-            quickPoseEngine.adviceLines = ["偵測已暫停。請按「開始」，倒數 5 秒後開始偵測。"]
+            quickPoseEngine.adviceLines = ["\(assessmentEngine.hudBadgeTitle) 已暫停。請按「開始」，倒數 5 秒後開始偵測。"]
         case .video:
-            quickPoseEngine.adviceLines = ["影片已載入。請按「開始」，倒數 \(Self.videoCountdownSeconds) 秒後開始偵測。"]
+            quickPoseEngine.adviceLines = ["影片已載入（\(assessmentEngine.hudBadgeTitle)）。請按「開始」，倒數 \(Self.videoCountdownSeconds) 秒後開始偵測。"]
         }
     }
 
@@ -1399,6 +1472,7 @@ struct PoseDetectionView: View {
         if Self.sdkKeyIsPlaceholder { return }
 
         wireQuickPoseEngineCallbacks()
+        syncAssessmentEngine()
 
         isPaused = false
         quickPoseEngine.detectionActive = true
@@ -1474,6 +1548,7 @@ private struct VideoSummarySheet: View {
     let lines: [String]
     let qualityResult: LivePrediction?
     let isAnalyzingQuality: Bool
+    var showsModelQuality: Bool = true
     let autoSaved: Bool
     let onShowHistory: () -> Void
     let onClose: () -> Void
@@ -1492,7 +1567,9 @@ private struct VideoSummarySheet: View {
                             .padding(.vertical, 4)
                     }
 
-                    qualityResultCard
+                    if showsModelQuality {
+                        qualityResultCard
+                    }
 
                     ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                         HStack(alignment: .firstTextBaseline, spacing: 8) {

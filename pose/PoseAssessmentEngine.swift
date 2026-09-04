@@ -3,8 +3,8 @@
 //  pose
 //
 //  偵測系統版本：
-//  - QuickPose：輕量骨架 + 規則建議
-//  - MediaPipe：完整 BlazePose 骨架 + 規則建議
+//  - QuickPose：輕量骨架 overlay（官方 SDK 原生模式）
+//  - MediaPipe：BlazePose Full 骨架 + 規則建議／步態分析
 //  - 自訓模型：後端 RandomForest 好／壞品質辨識
 //
 
@@ -36,11 +36,35 @@ enum PoseAssessmentEngine: String, CaseIterable, Identifiable, Codable {
         }
     }
 
+    var detail: String {
+        switch self {
+        case .quickPose:
+            return "官方骨架偵測，即時 FPS 與 overlay"
+        case .mediaPipe:
+            return "MediaPipe BlazePose Full 骨架、步態分析與規則建議"
+        case .trainedModel:
+            return "步態分析、節點資料庫、雲端品質模型"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .quickPose: return "figure.walk"
+        case .mediaPipe: return "figure.stand"
+        case .trainedModel: return "brain.head.profile"
+        }
+    }
+
     var adviceSectionTitle: String {
         switch self {
         case .quickPose, .mediaPipe: return "姿勢建議"
         case .trainedModel: return "模型辨識"
         }
+    }
+
+    /// 使用完整偵測管線（相機／影片、步態、節點資料庫）。
+    var usesFullDetectionPipeline: Bool {
+        self != .quickPose
     }
 
     /// 使用規則式姿勢建議（非後端 ML）。
@@ -63,12 +87,23 @@ enum PoseAssessmentEngine: String, CaseIterable, Identifiable, Codable {
 
     private static let storageKey = "PoseAssessmentEngine"
 
-    static func loadSaved() -> PoseAssessmentEngine {
-        guard let raw = UserDefaults.standard.string(forKey: storageKey),
-              let value = PoseAssessmentEngine(rawValue: raw) else {
-            return .quickPose
+    /// 相容舊版 AppStorage：`trained`（自訓模型）、`quickpose`。
+    static func resolved(fromStored raw: String) -> PoseAssessmentEngine {
+        if let value = PoseAssessmentEngine(rawValue: raw) {
+            return value
         }
-        return value
+        if raw == "trained" { return .trainedModel }
+        return .trainedModel
+    }
+
+    static func loadSaved() -> PoseAssessmentEngine {
+        if let raw = UserDefaults.standard.string(forKey: storageKey) {
+            return resolved(fromStored: raw)
+        }
+        if let legacy = UserDefaults.standard.string(forKey: "poseDetectionEngine") {
+            return resolved(fromStored: legacy)
+        }
+        return .quickPose
     }
 
     func save() {

@@ -2,35 +2,35 @@
 //  poseTests.swift
 //  poseTests
 //
-//  Created by 郭家豪 on 2026/4/15.
-//
 
 import XCTest
 @testable import pose
 
 final class poseTests: XCTestCase {
 
-    override func setUpWithError() throws {
-        // Put setup code here. This method is called before the invocation of each test method in the class.
+    func testAssessmentEngineHasMediaPipe() {
+        XCTAssertEqual(PoseAssessmentEngine.allCases.count, 3)
+        XCTAssertTrue(PoseAssessmentEngine.allCases.contains(.mediaPipe))
+        XCTAssertEqual(PoseAssessmentEngine.mediaPipe.title, "MediaPipe")
+        XCTAssertEqual(PoseAssessmentEngine.mediaPipe.hudBadgeTitle, "MediaPipe Full")
     }
 
-    override func tearDownWithError() throws {
-        // Put teardown code here. This method is called after the invocation of each test method in the class.
+    func testMediaPipeUsesLocalRulesNotBackendPredict() {
+        XCTAssertTrue(PoseAssessmentEngine.mediaPipe.usesFullDetectionPipeline)
+        XCTAssertTrue(PoseAssessmentEngine.mediaPipe.usesRuleBasedAdvice)
+        XCTAssertFalse(PoseAssessmentEngine.mediaPipe.usesTrainedModelPredict)
+
+        XCTAssertTrue(PoseAssessmentEngine.trainedModel.usesTrainedModelPredict)
+        XCTAssertFalse(PoseAssessmentEngine.trainedModel.usesRuleBasedAdvice)
+
+        XCTAssertFalse(PoseAssessmentEngine.quickPose.usesFullDetectionPipeline)
     }
 
-    func testExample() throws {
-        // This is an example of a functional test case.
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
-        // Any test you write for XCTest can be annotated as throws and async.
-        // Mark your test throws to produce an unexpected failure when your test encounters an uncaught error.
-        // Mark your test async to allow awaiting for asynchronous code to complete. Check the results with assertions afterwards.
+    func testLegacyEngineStorageMigration() {
+        XCTAssertEqual(PoseAssessmentEngine.resolved(fromStored: "trained"), .trainedModel)
+        XCTAssertEqual(PoseAssessmentEngine.resolved(fromStored: "trained_model"), .trainedModel)
+        XCTAssertEqual(PoseAssessmentEngine.resolved(fromStored: "quickpose"), .quickPose)
+        XCTAssertEqual(PoseAssessmentEngine.resolved(fromStored: "mediapipe"), .mediaPipe)
+        XCTAssertEqual(PoseAssessmentEngine.resolved(fromStored: "unknown"), .trainedModel)
     }
-
-    func testPerformanceExample() throws {
-        // This is an example of a performance test case.
-        self.measure {
-            // Put the code you want to measure the time of here.
-        }
-    }
-
 }
