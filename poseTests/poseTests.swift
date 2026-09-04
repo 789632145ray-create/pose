@@ -26,6 +26,18 @@ final class poseTests: XCTestCase {
         XCTAssertFalse(PoseAssessmentEngine.quickPose.usesFullDetectionPipeline)
     }
 
+    func testMediaPipeUsesDedicatedDatabase() {
+        XCTAssertEqual(MediaPipeRealm.fileName, "mediapipe.realm")
+        XCTAssertEqual(MediaPipeRealm.fileURL.lastPathComponent, "mediapipe.realm")
+        XCTAssertEqual(PoseRealm.fileURL.lastPathComponent, "pose.realm")
+        XCTAssertNotEqual(PoseDatabase.shared.fileURL, PoseDatabase.mediaPipe.fileURL)
+        XCTAssertTrue(PoseDatabase.store(for: .mediaPipe) === PoseDatabase.mediaPipe)
+        XCTAssertTrue(PoseDatabase.store(for: .trainedModel) === PoseDatabase.shared)
+        XCTAssertTrue(PoseDatabase.store(for: .quickPose) === PoseDatabase.shared)
+        XCTAssertEqual(PoseNodeStoreKind.mediaPipe.uploadPath, "/mediapipe/poses")
+        XCTAssertEqual(PoseNodeStoreKind.pose.uploadPath, "/poses")
+    }
+
     func testLegacyEngineStorageMigration() {
         XCTAssertEqual(PoseAssessmentEngine.resolved(fromStored: "trained"), .trainedModel)
         XCTAssertEqual(PoseAssessmentEngine.resolved(fromStored: "trained_model"), .trainedModel)

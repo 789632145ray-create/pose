@@ -55,10 +55,14 @@ mongo_client = make_mongo_client(MONGO_URL)
 mongo_db = mongo_client[MONGO_DB_NAME]
 users_col = mongo_db["users"]
 pose_sessions = mongo_db["pose_sessions"]
+mediapipe_sessions = mongo_db["mediapipe_sessions"]
 
 
 def init_mongo_indexes() -> None:
     users_col.create_index("username", unique=True)
+    pose_sessions.create_index("user")
+    mediapipe_sessions.create_index("user")
+    mediapipe_sessions.create_index("created_at")
 
 
 # ---------------------------------------------------------------------------
@@ -382,8 +386,7 @@ class PoseSessionSummary(BaseModel):
     created_at: float
 
 
-@app.post("/poses", response_model=PoseUploadResponse, status_code=status.HTTP_201_CREATED)
-def upload_pose_session(session: PoseSessionIn, username: str = Depends(current_user)) -> PoseUploadResponse:
+def _insert_labeled_session(collection, session: PoseSessionIn, username: str, engine: str) -> PoseUploadResponse:
     label = session.label.strip().lower()
     if label not in VALID_LABELS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="label 必須是 good 或 bad")
@@ -393,24 +396,24 @@ def upload_pose_session(session: PoseSessionIn, username: str = Depends(current_
     doc = session.model_dump()
     doc["label"] = label
     doc["user"] = username
+    doc["engine"] = engine
     doc["created_at"] = time.time()
     doc["frame_count"] = len(session.frames)
     doc["node_count"] = sum(len(f.nodes) for f in session.frames)
 
     try:
-        result = pose_sessions.insert_one(doc)
+        result = collection.insert_one(doc)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"無法寫入資料庫：{exc}")
 
     return PoseUploadResponse(id=str(result.inserted_id), frame_count=doc["frame_count"], node_count=doc["node_count"])
 
 
-@app.get("/poses", response_model=List[PoseSessionSummary])
-def list_pose_sessions(username: str = Depends(current_user)) -> List[PoseSessionSummary]:
+def _list_labeled_sessions(collection, username: str) -> List[PoseSessionSummary]:
     try:
-        cursor = pose_sessions.find(
+        cursor = collection.find(
             {"user": username},
-            {"frames": 0},  # 列表不回傳龐大的 frames
+            {"frames": 0},
         ).sort("created_at", DESCENDING)
         docs = list(cursor)
     except Exception as exc:  # noqa: BLE001
@@ -430,13 +433,11 @@ def list_pose_sessions(username: str = Depends(current_user)) -> List[PoseSessio
     ]
 
 
-@app.get("/dataset/stats")
-def dataset_stats(username: str = Depends(current_user)) -> dict:
-    """目前資料集的統計：各標籤筆數，供確認訓練資料是否平衡。"""
+def _dataset_stats(collection) -> dict:
     try:
         pipeline = [{"$group": {"_id": "$label", "count": {"$sum": 1}}}]
-        agg = {row["_id"]: row["count"] for row in pose_sessions.aggregate(pipeline)}
-        total = pose_sessions.count_documents({})
+        agg = {row["_id"]: row["count"] for row in collection.aggregate(pipeline)}
+        total = collection.count_documents({})
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"無法讀取資料庫：{exc}")
 
@@ -444,6 +445,38 @@ def dataset_stats(username: str = Depends(current_user)) -> dict:
         "total_sessions": total,
         "by_label": {"good": agg.get("good", 0), "bad": agg.get("bad", 0)},
     }
+
+
+@app.post("/poses", response_model=PoseUploadResponse, status_code=status.HTTP_201_CREATED)
+def upload_pose_session(session: PoseSessionIn, username: str = Depends(current_user)) -> PoseUploadResponse:
+    return _insert_labeled_session(pose_sessions, session, username, engine="pose")
+
+
+@app.get("/poses", response_model=List[PoseSessionSummary])
+def list_pose_sessions(username: str = Depends(current_user)) -> List[PoseSessionSummary]:
+    return _list_labeled_sessions(pose_sessions, username)
+
+
+@app.get("/dataset/stats")
+def dataset_stats(username: str = Depends(current_user)) -> dict:
+    """目前資料集的統計：各標籤筆數，供確認訓練資料是否平衡。"""
+    return _dataset_stats(pose_sessions)
+
+
+@app.post("/mediapipe/poses", response_model=PoseUploadResponse, status_code=status.HTTP_201_CREATED)
+def upload_mediapipe_session(session: PoseSessionIn, username: str = Depends(current_user)) -> PoseUploadResponse:
+    """MediaPipe 獨立資料庫：寫入 MongoDB `mediapipe_sessions`，不與 pose_sessions 混用。"""
+    return _insert_labeled_session(mediapipe_sessions, session, username, engine="mediapipe")
+
+
+@app.get("/mediapipe/poses", response_model=List[PoseSessionSummary])
+def list_mediapipe_sessions(username: str = Depends(current_user)) -> List[PoseSessionSummary]:
+    return _list_labeled_sessions(mediapipe_sessions, username)
+
+
+@app.get("/mediapipe/dataset/stats")
+def mediapipe_dataset_stats(username: str = Depends(current_user)) -> dict:
+    return _dataset_stats(mediapipe_sessions)
 
 
 # ---------------------------------------------------------------------------

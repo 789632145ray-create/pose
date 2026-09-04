@@ -11,11 +11,12 @@ iPhone（任何地方）
 Railway / Render（FastAPI 容器）
     └── MongoDB Atlas
             ├── users（帳號，PBKDF2 雜湊密碼）
-            └── pose_sessions（姿勢節點 / 訓練標籤）
+            ├── pose_sessions（QuickPose／自訓模型節點 / 訓練標籤）
+            └── mediapipe_sessions（MediaPipe 骨架，獨立 collection）
 
-iPhone 本機 Realm Database（pose.realm，純本機、不同步雲端）
-    ├── 姿勢節點 session（取代舊版 SQLite）
-    └── 分析摘要歷史（取代舊版 JSON）
+iPhone 本機 Realm Database（純本機、不同步雲端）
+    ├── pose.realm：QuickPose／自訓模型節點 + 分析摘要
+    └── mediapipe.realm：MediaPipe 骨架 session
 ```
 
 > **關於 App Services**：MongoDB Atlas App Services 已於 **2025 年 9 月 30 日**正式下線（EOL），Atlas 介面中已無法建立。本專案帳號改由 **FastAPI + MongoDB `users` collection** 管理；Realm 僅作本機資料庫使用。

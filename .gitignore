@@ -37,5 +37,10 @@ backend/app.db-shm
 .cursor/
 *.log
 
+# 本機 Realm（pose.realm / mediapipe.realm 在裝置上產生）
+*.realm
+*.realm.lock
+*.realm.management/
+
 # 敏感設定（若將來有本地 override）
 *.local.plist

@@ -260,7 +260,8 @@ final class PoseStreamClient {
         rightSteps: Int,
         avgCadenceBPM: Double?,
         frames: [PoseFrameRecord],
-        maxFrames: Int = 600
+        maxFrames: Int = 600,
+        path: String = "/poses"
     ) async -> LabeledUploadResult {
         guard let token = KeychainHelper.read(Self.tokenAccount), !token.isEmpty else {
             return LabeledUploadResult(success: false, message: "尚未登入")
@@ -294,7 +295,7 @@ final class PoseStreamClient {
         )
 
         do {
-            let (data, http) = try await postRaw(path: "/poses", body: body, timeout: 120)
+            let (data, http) = try await postRaw(path: path, body: body, timeout: 120)
             guard (200...299).contains(http.statusCode) else {
                 let detail = (try? JSONDecoder().decode(APIErrorBody.self, from: data))?.detail
                 return LabeledUploadResult(success: false, message: detail ?? "上傳失敗（\(http.statusCode)）")

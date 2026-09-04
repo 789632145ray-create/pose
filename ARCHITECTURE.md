@@ -117,7 +117,7 @@ flowchart TB
 | 引擎選擇 | QuickPose 原生 / MediaPipe Full / 自訓模型 | `pose/PoseAssessmentEngine.swift` |
 | SDK 初始化與影格回呼 | `QuickPose.start`；MediaPipe 使用 `modelComplexity: .good`（BlazePose Full）+ `.showPoints()` | `pose/PoseDetectionView.swift` → `QuickPoseEngine` |
 | 35 關節擷取 | nose、shoulder_mid、hip_mid + 左右各 16 點 | `pose/PoseDatabase.swift` → `PoseNodeExtractor` |
-| 本機持久化 | 每幀寫入 Realm（非阻塞背景佇列） | `pose/PoseDatabase.swift`, `pose/PoseRealm.swift` |
+| 本機持久化 | 每幀寫入 Realm（非阻塞背景佇列）；MediaPipe 用獨立 `mediapipe.realm` | `pose/PoseDatabase.swift`, `pose/PoseRealm.swift`, `pose/MediaPipeRealm.swift` |
 | 即時串流上傳 | 自訓模型模式逐批 POST 至 MongoDB | `pose/PoseStreamClient.swift` |
 
 **資料格式（單一節點）：**
@@ -133,7 +133,7 @@ struct PoseNode {
 **流程：**
 
 1. QuickPose 回傳 `Landmarks` → `PoseNodeExtractor.extractAll`
-2. `PoseDatabase.shared.recordFrame` 寫入本機 Realm
+2. `PoseDatabase.store(for:)` 寫入本機 Realm（MediaPipe → `mediapipe.realm`，其餘 → `pose.realm`）
 3. `PoseStreamClient.enqueue` 暫存待上傳幀（訓練模型模式）
 
 ---
@@ -305,9 +305,10 @@ flowchart LR
 
 | 儲存 | 技術 | 內容 | 位置 |
 |------|------|------|------|
-| iOS 本機 | **Realm** (`pose.realm`) | 姿勢節點 session、分析摘要 | `pose/PoseRealm.swift` |
+| iOS 本機 | **Realm** (`pose.realm`) | QuickPose／自訓模型節點、分析摘要 | `pose/PoseRealm.swift` |
+| iOS 本機 | **Realm** (`mediapipe.realm`) | MediaPipe BlazePose 節點 session | `pose/MediaPipeRealm.swift` |
 | iOS 本機（舊版） | SQLite / JSON | 首次啟動自動遷移至 Realm | `PoseRealm.migrateLegacyIfNeeded` |
-| 雲端 | **MongoDB Atlas** | `users`（帳號）、`pose_sessions`（節點+標籤） | `backend/main.py` |
+| 雲端 | **MongoDB Atlas** | `users`、`pose_sessions`、`mediapipe_sessions` | `backend/main.py` |
 | 雲端模型 | Railway Volume / 映像內 | `pose_quality_model.joblib` | `backend/` |
 
 > 架構圖中的「本機 SQLite app.db」與「Railway SQLite 帳號庫」在現版已改為 **MongoDB Atlas 統一管理帳號與姿勢資料**；本機以 **Realm** 取代 SQLite 存節點與摘要。
@@ -339,7 +340,7 @@ RootView (登入)
 | 模組 | iOS (`pose/`) | 後端 (`backend/`) |
 |------|---------------|-------------------|
 | ① 使用者端 APP | `RootView`, `LoginView`, `PoseDetectionView`, `AuthManager` | — |
-| ② 資料蒐集 | `PoseDatabase`, `PoseNodeExtractor`, `QuickPoseEngine` | — |
+| ② 資料蒐集 | `PoseDatabase`, `MediaPipeRealm`, `PoseNodeExtractor`, `QuickPoseEngine` | `mediapipe_sessions` |
 | ③ 特徵擷取 | `PoseAnalysisPipeline`, `PoseAdvice` | `train.py` (session_features) |
 | ④ AI 辨識 | `PoseStreamClient`, `PoseAssessmentEngine`（QuickPose / MediaPipe / 自訓模型） | `main.py` (/predict), `*.joblib` |
 | ⑤ 健康評估 | `PoseAnalysisPipeline`, `LivePrediction` | — |

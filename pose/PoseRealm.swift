@@ -2,7 +2,8 @@
 //  PoseRealm.swift
 //  pose
 //
-//  本機 Realm Database：姿勢節點 session 與分析摘要歷史。
+//  本機 Realm Database：QuickPose／自訓模型姿勢節點 session 與分析摘要歷史。
+//  MediaPipe 資料在獨立檔 mediapipe.realm，見 MediaPipeRealm.swift。
 //
 
 import Foundation

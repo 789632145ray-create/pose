@@ -135,7 +135,7 @@ final class QuickPoseEngine: ObservableObject {
                 }
                 let advice = PoseFrameAdvice(lines: mergedLines, issues: mergedIssues)
                 let nodes = PoseNodeExtractor.extractAll(from: landmarks)
-                PoseDatabase.shared.recordFrame(nodes: nodes)
+                PoseDatabase.store(for: assessmentEngine).recordFrame(nodes: nodes)
                 let ts = Date().timeIntervalSince1970
                 let savedCount = nodes.count
                 let result = pipeline.process(
@@ -329,8 +329,15 @@ struct PoseDetectionView: View {
     @State private var historySavedForSession = false
     @StateObject private var summaryStore = SummaryStore()
 
-    /// 姿勢節點資料庫；偵測期間每一幀的全部節點都寫入此處。
-    private let database = PoseDatabase.shared
+    /// 目前引擎對應的本機節點庫（MediaPipe 為獨立 mediapipe.realm）。
+    private var nodeDatabase: PoseDatabase {
+        PoseDatabase.store(for: assessmentEngine)
+    }
+    /// 開始 session 時鎖定的庫，避免中途切引擎寫錯檔。
+    @State private var sessionIsMediaPipe = false
+    private var sessionDatabase: PoseDatabase {
+        sessionIsMediaPipe ? .mediaPipe : .shared
+    }
     /// 目前進行中的資料庫 session id（nil 代表沒有進行中的 session）。
     @State private var dbSessionID: String?
     @State private var showDatabase = false
@@ -397,7 +404,7 @@ struct PoseDetectionView: View {
                 }
             }
             .sheet(isPresented: $showDatabase) {
-                PoseDatabaseSheet(database: database, stream: stream) {
+                PoseDatabaseSheet(database: nodeDatabase, stream: stream) {
                     showDatabase = false
                 }
             }
@@ -612,7 +619,7 @@ struct PoseDetectionView: View {
             Button {
                 showDatabase = true
             } label: {
-                Label("姿勢節點資料庫（本次 \(quickPoseEngine.dbNodeCount) 筆）", systemImage: "cylinder.split.1x2.fill")
+                Label("\(nodeDatabase.kind.buttonTitle)（本次 \(quickPoseEngine.dbNodeCount) 筆）", systemImage: "cylinder.split.1x2.fill")
                     .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
@@ -851,6 +858,12 @@ struct PoseDetectionView: View {
         guard previous != newEngine else { return }
         livePrediction = nil
         videoQualityResult = nil
+        finishDatabaseSession()
+        if engineAttached, quickPoseEngine.detectionActive {
+            sessionIsMediaPipe = newEngine == .mediaPipe
+            dbSessionID = nodeDatabase.beginSession(sourceLabel: currentSourceLabel)
+            quickPoseEngine.dbNodeCount = 0
+        }
         if quickPoseEngine.loopActive {
             quickPoseEngine.restartLoop()
         }
@@ -993,7 +1006,7 @@ struct PoseDetectionView: View {
     @MainActor
     private func finishDatabaseSession() {
         guard dbSessionID != nil else { return }
-        database.endSession(
+        sessionDatabase.endSession(
             totalSteps: analysisPipeline.totalSteps,
             leftSteps: analysisPipeline.leftSteps,
             rightSteps: analysisPipeline.rightSteps,
@@ -1146,7 +1159,7 @@ struct PoseDetectionView: View {
 
         let sessionID = dbSessionID
         Task {
-            let frames = sessionID.map { database.allFrames(sessionID: $0) } ?? []
+            let frames = sessionID.map { sessionDatabase.allFrames(sessionID: $0) } ?? []
             let result = await stream.predict(frames: frames)
             await MainActor.run {
                 videoQualityResult = result
@@ -1332,6 +1345,11 @@ struct PoseDetectionView: View {
             Text("資料庫節點：\(quickPoseEngine.dbNodeCount)")
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.teal)
+            if assessmentEngine == .mediaPipe {
+                Text("寫入 \(MediaPipeRealm.fileName)")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.mint)
+            }
             if quickPoseEngine.loopActive, quickPoseEngine.frameCallbackCount == 0 {
                 Text("等待第一幀…")
                     .font(.caption2)
@@ -1488,7 +1506,8 @@ struct PoseDetectionView: View {
         historySavedForSession = false
         lastSavedID = nil
         quickPoseEngine.dbNodeCount = 0
-        dbSessionID = database.beginSession(sourceLabel: currentSourceLabel)
+        sessionIsMediaPipe = assessmentEngine == .mediaPipe
+        dbSessionID = nodeDatabase.beginSession(sourceLabel: currentSourceLabel)
         startStreaming()
 
         quickPoseEngine.adviceLines = [resuming ? "正在恢復偵測…" : "正在啟動偵測…"]
@@ -1789,14 +1808,17 @@ private struct PoseDatabaseSheet: View {
                         Image(systemName: "cylinder.split.1x2")
                             .font(.system(size: 40))
                             .foregroundStyle(.secondary)
-                        Text("資料庫尚無任何節點")
+                        Text(database.kind == .mediaPipe ? "MediaPipe 資料庫尚無節點" : "資料庫尚無任何節點")
                             .font(.body)
                             .foregroundStyle(.secondary)
-                        Text("開始相機或影片偵測後，節點會存入資料庫；完成後可在此標「好 / 壞」上傳訓練。")
+                        Text(database.kind.emptyHint)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal, 32)
+                        Text(database.fileURL.lastPathComponent)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
@@ -1804,6 +1826,7 @@ private struct PoseDatabaseSheet: View {
                         Section {
                             LabeledContent("偵測次數", value: "\(records.count)")
                             LabeledContent("節點總筆數", value: "\(totalNodes)")
+                            LabeledContent("本機檔案", value: database.fileURL.lastPathComponent)
                         } header: {
                             Text("總覽")
                         }
@@ -1848,7 +1871,7 @@ private struct PoseDatabaseSheet: View {
                     }
                 }
             }
-            .navigationTitle("節點資料庫")
+            .navigationTitle(database.kind.sheetTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -1907,7 +1930,9 @@ private struct PoseSessionDetailView: View {
             } header: {
                 Text("此次偵測")
             } footer: {
-                Text("在此標記好 / 壞並上傳至雲端，即可用 train.py 訓練模型。")
+                Text(database.kind == .mediaPipe
+                     ? "此筆資料來自 MediaPipe 獨立庫（mediapipe.realm）。標記後會上傳到雲端 mediapipe_sessions。"
+                     : "在此標記好 / 壞並上傳至雲端，即可用 train.py 訓練模型。")
             }
 
             if canLabel {
@@ -1980,7 +2005,8 @@ private struct PoseSessionDetailView: View {
                 leftSteps: record.leftSteps,
                 rightSteps: record.rightSteps,
                 avgCadenceBPM: record.avgCadenceBPM,
-                frames: frames
+                frames: frames,
+                path: database.kind.uploadPath
             )
             await MainActor.run {
                 isUploading = false
