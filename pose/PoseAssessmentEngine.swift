@@ -50,7 +50,7 @@ enum PoseAssessmentEngine: String, CaseIterable, Identifiable, Codable {
     var systemImage: String {
         switch self {
         case .quickPose: return "figure.walk"
-        case .mediaPipe: return "figure.stand"
+        case .mediaPipe: return "person.fill.viewfinder"
         case .trainedModel: return "brain.head.profile"
         }
     }

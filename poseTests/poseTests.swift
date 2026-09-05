@@ -10,6 +10,7 @@ final class poseTests: XCTestCase {
 
     func testAssessmentEngineHasMediaPipe() {
         XCTAssertEqual(PoseAssessmentEngine.allCases.count, 3)
+        XCTAssertEqual(PoseAssessmentEngine.allCases.map(\.title), ["QuickPose", "MediaPipe", "自訓模型"])
         XCTAssertTrue(PoseAssessmentEngine.allCases.contains(.mediaPipe))
         XCTAssertEqual(PoseAssessmentEngine.mediaPipe.title, "MediaPipe")
         XCTAssertEqual(PoseAssessmentEngine.mediaPipe.hudBadgeTitle, "MediaPipe Full")

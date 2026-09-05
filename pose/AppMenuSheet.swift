@@ -58,12 +58,16 @@ struct AppMenuSheet: View {
     }
 
     private var engineSection: some View {
-        Section("偵測引擎") {
+        Section {
             ForEach(PoseAssessmentEngine.allCases) { engine in
                 AppMenuEngineRow(engine: engine, isSelected: modeStore.engine == engine) {
                     modeStore.engine = engine
                 }
             }
+        } header: {
+            Text("偵測引擎（3 種）")
+        } footer: {
+            Text("QuickPose 為官方 overlay；MediaPipe 為 BlazePose Full 骨架；自訓模型會連雲端辨識。")
         }
     }
 

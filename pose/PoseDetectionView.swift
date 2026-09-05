@@ -1258,11 +1258,11 @@ struct PoseDetectionView: View {
     private func cameraBottomPanelHeight(for height: CGFloat) -> CGFloat {
         let ratio: CGFloat = {
             switch detectionSource {
-            case .video: return 0.46
-            case .liveCamera: return 0.40
+            case .video: return 0.50
+            case .liveCamera: return 0.46
             }
         }()
-        return min(max(height * ratio, 300), 420)
+        return min(max(height * ratio, 340), 460)
     }
 
     @ViewBuilder

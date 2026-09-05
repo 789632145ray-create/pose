@@ -25,6 +25,8 @@ final class DetectionModeStore: ObservableObject {
 struct PoseDetectionShellView: View {
     @EnvironmentObject private var auth: AuthManager
     @StateObject private var modeStore = DetectionModeStore()
+    @AppStorage("didShowEngineChooser") private var didShowEngineChooser = false
+    @State private var showEngineChooser = false
 
     var body: some View {
         Group {
@@ -36,6 +38,69 @@ struct PoseDetectionShellView: View {
             }
         }
         .environmentObject(modeStore)
+        .sheet(isPresented: $showEngineChooser) {
+            EngineChooserSheet(modeStore: modeStore) {
+                didShowEngineChooser = true
+                showEngineChooser = false
+            }
+        }
+        .onAppear {
+            if !didShowEngineChooser {
+                showEngineChooser = true
+            }
+        }
+    }
+}
+
+private struct EngineChooserSheet: View {
+    @ObservedObject var modeStore: DetectionModeStore
+    let onDone: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(PoseAssessmentEngine.allCases) { engine in
+                        Button {
+                            modeStore.engine = engine
+                            onDone()
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: engine.systemImage)
+                                    .font(.title3)
+                                    .foregroundStyle(engine == .mediaPipe ? Color.mint : Color.accentColor)
+                                    .frame(width: 32)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(engine.title)
+                                        .font(.headline)
+                                        .foregroundStyle(.primary)
+                                    Text(engine.detail)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if modeStore.engine == engine {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(Color.accentColor)
+                                }
+                            }
+                        }
+                    }
+                } header: {
+                    Text("請選擇偵測引擎")
+                } footer: {
+                    Text("之後可在畫面底部或右上角選單隨時切換。MediaPipe 會把骨架存進獨立的 mediapipe.realm。")
+                }
+            }
+            .navigationTitle("偵測引擎")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("稍後") { onDone() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 }
 
@@ -45,33 +110,42 @@ struct DetectionEnginePickerRow: View {
     @EnvironmentObject private var modeStore: DetectionModeStore
 
     var body: some View {
-        Menu {
-            ForEach(PoseAssessmentEngine.allCases) { engine in
-                Button {
-                    modeStore.engine = engine
-                } label: {
-                    if modeStore.engine == engine {
-                        Label(engine.title, systemImage: "checkmark")
-                    } else {
-                        Text(engine.title)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("偵測引擎")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.75))
+            HStack(spacing: 6) {
+                ForEach(PoseAssessmentEngine.allCases) { engine in
+                    let selected = modeStore.engine == engine
+                    Button {
+                        modeStore.engine = engine
+                    } label: {
+                        VStack(spacing: 4) {
+                            Image(systemName: engine.systemImage)
+                                .font(.body.weight(.semibold))
+                            Text(engine.title)
+                                .font(.caption.weight(.bold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
                     }
+                    .buttonStyle(.bordered)
+                    .tint(selected ? engineTint(engine) : .gray)
+                    .accessibilityLabel(engine.title)
+                    .accessibilityAddTraits(selected ? .isSelected : [])
                 }
             }
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: modeStore.engine.systemImage)
-                Text("偵測引擎：\(modeStore.engine.title)")
-                    .font(.subheadline.weight(.semibold))
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.caption2.weight(.semibold))
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 10)
-            .padding(.horizontal, 4)
         }
-        .buttonStyle(.bordered)
-        .tint(.cyan)
+    }
+
+    private func engineTint(_ engine: PoseAssessmentEngine) -> Color {
+        switch engine {
+        case .quickPose: return .cyan
+        case .mediaPipe: return .mint
+        case .trainedModel: return .indigo
+        }
     }
 }
 
