@@ -367,6 +367,7 @@ class PoseSessionIn(BaseModel):
     left_steps: int = 0
     right_steps: int = 0
     avg_cadence_bpm: Optional[float] = None
+    engine: Optional[str] = None
     frames: List[PoseFrame]
 
 
@@ -396,7 +397,7 @@ def _insert_labeled_session(collection, session: PoseSessionIn, username: str, e
     doc = session.model_dump()
     doc["label"] = label
     doc["user"] = username
-    doc["engine"] = engine
+    doc["engine"] = (session.engine or engine).strip().lower() or engine
     doc["created_at"] = time.time()
     doc["frame_count"] = len(session.frames)
     doc["node_count"] = sum(len(f.nodes) for f in session.frames)

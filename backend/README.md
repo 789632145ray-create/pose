@@ -76,7 +76,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 | POST | `/poses` | 上傳一段姿勢節點 + 標籤（整段，需帶權杖） | `{"label":"good\|bad","frames":[...],...}` |
 | GET  | `/poses` | 列出自己上傳過的 session（不含 frames） | Header `Authorization: Bearer <token>` |
 | GET  | `/dataset/stats` | 資料集統計（各標籤筆數） | Header `Authorization: Bearer <token>` |
-| POST | `/mediapipe/poses` | 上傳 MediaPipe 骨架到獨立 `mediapipe_sessions` | 同 `/poses` |
+| POST | `/mediapipe/poses` | 上傳 MediaPipe 骨架到獨立 `mediapipe_sessions` | 同 `/poses`（舊版雲端若 404，App 會改傳 `/poses`） |
 | GET  | `/mediapipe/poses` | 列出自己的 MediaPipe session | Header `Authorization: Bearer <token>` |
 | GET  | `/mediapipe/dataset/stats` | MediaPipe 資料集統計 | Header `Authorization: Bearer <token>` |
 | POST | `/sessions` | 開一個即時串流 session | `{"label":"good\|bad\|null","source_label"}` |

@@ -37,6 +37,7 @@ final class poseTests: XCTestCase {
         XCTAssertTrue(PoseDatabase.store(for: .quickPose) === PoseDatabase.shared)
         XCTAssertEqual(PoseNodeStoreKind.mediaPipe.uploadPath, "/mediapipe/poses")
         XCTAssertEqual(PoseNodeStoreKind.pose.uploadPath, "/poses")
+        XCTAssertTrue(PoseNodeStoreKind.mediaPipe.uploadPath.contains("mediapipe"))
     }
 
     func testLegacyEngineStorageMigration() {

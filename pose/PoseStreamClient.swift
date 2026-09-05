@@ -237,6 +237,7 @@ final class PoseStreamClient {
         let left_steps: Int
         let right_steps: Int
         let avg_cadence_bpm: Double?
+        let engine: String
         let frames: [WireFrame]
     }
 
@@ -284,6 +285,7 @@ final class PoseStreamClient {
             )
         }
 
+        let engine = path.contains("mediapipe") ? "mediapipe" : "pose"
         let body = PoseUploadBody(
             label: label,
             source_label: sourceLabel,
@@ -291,25 +293,49 @@ final class PoseStreamClient {
             left_steps: leftSteps,
             right_steps: rightSteps,
             avg_cadence_bpm: avgCadenceBPM,
+            engine: engine,
             frames: wire
         )
 
         do {
-            let (data, http) = try await postRaw(path: path, body: body, timeout: 120)
-            guard (200...299).contains(http.statusCode) else {
-                let detail = (try? JSONDecoder().decode(APIErrorBody.self, from: data))?.detail
-                return LabeledUploadResult(success: false, message: detail ?? "上傳失敗（\(http.statusCode)）")
-            }
-            if let resp = try? JSONDecoder().decode(PoseUploadResponse.self, from: data) {
-                return LabeledUploadResult(
-                    success: true,
-                    message: "已上傳 \(resp.frame_count) 幀、\(resp.node_count) 節點"
+            let first = try await postRaw(path: path, body: body, timeout: 120)
+            if first.1.statusCode == 404, path != "/poses" {
+                let fallback = try await postRaw(path: "/poses", body: body, timeout: 120)
+                return Self.decodeLabeledUpload(
+                    data: fallback.0,
+                    http: fallback.1,
+                    extraSuccessNote: "雲端尚未部署 MediaPipe 專用庫，已改存 pose_sessions"
                 )
             }
-            return LabeledUploadResult(success: true, message: "已上傳至雲端")
+            return Self.decodeLabeledUpload(data: first.0, http: first.1)
         } catch {
-            return LabeledUploadResult(success: false, message: "無法連線：\(error.localizedDescription)")
+            return LabeledUploadResult(
+                success: false,
+                message: "無法連線 \(baseURL)\(path)：\(error.localizedDescription)"
+            )
         }
+    }
+
+    private static func decodeLabeledUpload(
+        data: Data,
+        http: HTTPURLResponse,
+        extraSuccessNote: String? = nil
+    ) -> LabeledUploadResult {
+        if http.statusCode == 401 {
+            return LabeledUploadResult(success: false, message: "登入已過期，請重新登入")
+        }
+        guard (200...299).contains(http.statusCode) else {
+            let detail = (try? JSONDecoder().decode(APIErrorBody.self, from: data))?.detail
+            return LabeledUploadResult(success: false, message: detail ?? "上傳失敗（\(http.statusCode)）")
+        }
+        if let resp = try? JSONDecoder().decode(PoseUploadResponse.self, from: data) {
+            var message = "已上傳 \(resp.frame_count) 幀、\(resp.node_count) 節點"
+            if let extraSuccessNote {
+                message += "（\(extraSuccessNote)）"
+            }
+            return LabeledUploadResult(success: true, message: message)
+        }
+        return LabeledUploadResult(success: true, message: extraSuccessNote ?? "已上傳至雲端")
     }
 
     // MARK: 私有

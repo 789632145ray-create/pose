@@ -55,10 +55,10 @@ final class RLMSavedSummary: Object {
 // MARK: - 開檔與舊版資料遷移
 
 enum PoseRealm {
-    private static let schemaVersion: UInt64 = 1
-    private static let legacyMigratedKey = "pose_realm_legacy_migrated_v1"
+    nonisolated private static let schemaVersion: UInt64 = 1
+    nonisolated private static let legacyMigratedKey = "pose_realm_legacy_migrated_v1"
 
-    static var fileURL: URL {
+    nonisolated static var fileURL: URL {
         let fm = FileManager.default
         let base: URL
         if let dir = try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true) {
@@ -69,7 +69,7 @@ enum PoseRealm {
         return base.appendingPathComponent("pose.realm")
     }
 
-    static func open() throws -> Realm {
+    nonisolated static func open() throws -> Realm {
         let config = Realm.Configuration(
             fileURL: fileURL,
             schemaVersion: schemaVersion,
@@ -84,7 +84,7 @@ enum PoseRealm {
     }
 
     /// 首次啟動時，將舊版 SQLite / JSON 匯入 Realm 並備份原檔。
-    static func migrateLegacyIfNeeded() {
+    nonisolated static func migrateLegacyIfNeeded() {
         guard !UserDefaults.standard.bool(forKey: legacyMigratedKey) else { return }
         guard let realm = try? open() else { return }
 
@@ -104,7 +104,7 @@ enum PoseRealm {
 
     // MARK: 私有遷移
 
-    private static func backupIfExists(_ url: URL) {
+    nonisolated private static func backupIfExists(_ url: URL) {
         let fm = FileManager.default
         guard fm.fileExists(atPath: url.path) else { return }
         let backup = url.deletingPathExtension().appendingPathExtension("bak")
@@ -112,7 +112,7 @@ enum PoseRealm {
         try? fm.moveItem(at: url, to: backup)
     }
 
-    private static func migrateSummariesJSON(from url: URL, into realm: Realm) {
+    nonisolated private static func migrateSummariesJSON(from url: URL, into realm: Realm) {
         guard FileManager.default.fileExists(atPath: url.path),
               let data = try? Data(contentsOf: url),
               let decoded = try? JSONDecoder().decode([LegacySavedSummary].self, from: data) else { return }
@@ -133,7 +133,7 @@ enum PoseRealm {
         }
     }
 
-    private static func migrateSQLite(from url: URL, into realm: Realm) {
+    nonisolated private static func migrateSQLite(from url: URL, into realm: Realm) {
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         var db: OpaquePointer?
         guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db else { return }
@@ -216,7 +216,7 @@ enum PoseRealm {
         }
     }
 
-    private struct LegacySavedSummary: Codable {
+    nonisolated private struct LegacySavedSummary: Codable {
         let id: UUID
         let date: Date
         let sourceLabel: String

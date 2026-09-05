@@ -10,10 +10,10 @@ import Foundation
 import RealmSwift
 
 enum MediaPipeRealm {
-    static let schemaVersion: UInt64 = 1
-    static let fileName = "mediapipe.realm"
+    nonisolated static let schemaVersion: UInt64 = 1
+    nonisolated static let fileName = "mediapipe.realm"
 
-    static var fileURL: URL {
+    nonisolated static var fileURL: URL {
         let fm = FileManager.default
         let base: URL
         if let dir = try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true) {
@@ -24,7 +24,7 @@ enum MediaPipeRealm {
         return base.appendingPathComponent(fileName)
     }
 
-    static func open() throws -> Realm {
+    nonisolated static func open() throws -> Realm {
         let config = Realm.Configuration(
             fileURL: fileURL,
             schemaVersion: schemaVersion,
