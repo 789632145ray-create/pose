@@ -316,6 +316,7 @@ struct PoseDetectionView: View {
 
     @State private var detectionSource: DetectionSource = .liveCamera
     @State private var pickedItem: PhotosPickerItem?
+    @State private var showFileImporter = false
     @State private var isLoadingVideo = false
     @State private var showSummary = false
     @State private var summaryLines: [String] = []
@@ -482,6 +483,13 @@ struct PoseDetectionView: View {
             .onChange(of: pickedItem) { _, newItem in
                 Task { await handlePickedItem(newItem) }
             }
+            .fileImporter(
+                isPresented: $showFileImporter,
+                allowedContentTypes: [.movie, .mpeg4Movie, .quickTimeMovie, .avi],
+                allowsMultipleSelection: false
+            ) { result in
+                handleImportedFile(result)
+            }
             .alert("影片載入失敗", isPresented: Binding(
                 get: { videoLoadError != nil },
                 set: { if !$0 { videoLoadError = nil } }
@@ -591,7 +599,7 @@ struct PoseDetectionView: View {
             }
             .foregroundStyle(.cyan)
 #endif
-            uploadVideoButton(label: "或改為上傳影片偵測")
+            videoImportButtons(primaryLabel: "或改為上傳影片偵測")
         }
     }
 
@@ -715,8 +723,7 @@ struct PoseDetectionView: View {
                 .tint(.orange)
                 .disabled(isPaused || !engineAttached || Self.sdkKeyIsPlaceholder || countdownSeconds != nil)
             }
-            uploadVideoButton(label: "上傳影片偵測")
-                .frame(maxWidth: .infinity)
+            videoImportButtons(primaryLabel: "上傳影片偵測")
 
         case .video:
             HStack(spacing: 10) {
@@ -774,8 +781,7 @@ struct PoseDetectionView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.gray)
             }
-            uploadVideoButton(label: "重新選擇影片")
-                .frame(maxWidth: .infinity)
+            videoImportButtons(primaryLabel: "重新選擇影片")
         }
     }
 
@@ -795,21 +801,35 @@ struct PoseDetectionView: View {
 
     @MainActor
     @ViewBuilder
-    private func uploadVideoButton(label: String) -> some View {
-        PhotosPicker(selection: $pickedItem, matching: .videos, photoLibrary: .shared()) {
-            HStack(spacing: 8) {
-                if isLoadingVideo {
-                    ProgressView().tint(.white)
+    private func videoImportButtons(primaryLabel: String) -> some View {
+        HStack(spacing: 10) {
+            PhotosPicker(selection: $pickedItem, matching: .videos, photoLibrary: .shared()) {
+                HStack(spacing: 8) {
+                    if isLoadingVideo {
+                        ProgressView().tint(.white)
+                    }
+                    Label(primaryLabel, systemImage: "film.fill")
+                        .font(.subheadline.weight(.semibold))
                 }
-                Label(label, systemImage: "film.fill")
-                    .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 10)
+            .buttonStyle(.borderedProminent)
+            .tint(.purple)
+            .disabled(isLoadingVideo)
+
+            Button {
+                showFileImporter = true
+            } label: {
+                Label("檔案", systemImage: "folder.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+            }
+            .buttonStyle(.bordered)
+            .tint(.purple)
+            .disabled(isLoadingVideo)
         }
-        .buttonStyle(.borderedProminent)
-        .tint(.purple)
-        .disabled(isLoadingVideo || Self.sdkKeyIsPlaceholder)
     }
 
     @MainActor
@@ -852,7 +872,6 @@ struct PoseDetectionView: View {
 
     @MainActor
     private func handleAssessmentEngineChange(_ newEngine: PoseAssessmentEngine) {
-        guard newEngine.usesFullDetectionPipeline else { return }
         let previous = quickPoseEngine.assessmentEngine
         syncAssessmentEngine()
         guard previous != newEngine else { return }
@@ -886,21 +905,53 @@ struct PoseDetectionView: View {
         }
         do {
             if let movie = try await item.loadTransferable(type: PickedMovie.self) {
-                await MainActor.run {
-                    if pendingVideo != nil {
-                        cancelPendingVideo()
-                    }
-                    if case .video = detectionSource {
-                        stopDetectionActivity(fullReset: false)
-                    }
-                    pendingVideo = PendingVideo(url: movie.url, displayName: movie.url.lastPathComponent)
-                }
-            } else {
-                videoLoadError = "找不到影片內容，請重新選擇。"
+                presentPendingMovie(url: movie.url, displayName: movie.url.lastPathComponent)
+                return
             }
+            if let data = try await item.loadTransferable(type: Data.self) {
+                let name = item.itemIdentifier ?? "video.mov"
+                let dst = URL.temporaryDirectory.appendingPathComponent(UUID().uuidString + "-" + URL(fileURLWithPath: name).lastPathComponent)
+                try data.write(to: dst)
+                presentPendingMovie(url: dst, displayName: dst.lastPathComponent)
+                return
+            }
+            videoLoadError = "找不到影片內容。請改用「檔案」選擇，或確認影片已下載到本機。"
         } catch {
-            videoLoadError = "影片載入錯誤：\(error.localizedDescription)"
+            videoLoadError = "影片載入錯誤：\(error.localizedDescription)。可改點「檔案」從檔案 App 匯入。"
         }
+    }
+
+    @MainActor
+    private func handleImportedFile(_ result: Result<[URL], Error>) {
+        switch result {
+        case .failure(let error):
+            videoLoadError = "無法開啟檔案：\(error.localizedDescription)"
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer {
+                if accessed { url.stopAccessingSecurityScopedResource() }
+            }
+            do {
+                let dst = URL.temporaryDirectory.appendingPathComponent(UUID().uuidString + "-" + url.lastPathComponent)
+                try? FileManager.default.removeItem(at: dst)
+                try FileManager.default.copyItem(at: url, to: dst)
+                presentPendingMovie(url: dst, displayName: url.lastPathComponent)
+            } catch {
+                videoLoadError = "影片複製失敗：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    @MainActor
+    private func presentPendingMovie(url: URL, displayName: String) {
+        if pendingVideo != nil {
+            cancelPendingVideo()
+        }
+        if case .video = detectionSource {
+            stopDetectionActivity(fullReset: false)
+        }
+        pendingVideo = PendingVideo(url: url, displayName: displayName)
     }
 
     /// 停止資料處理與 session；切換來源或離開偵測時使用（會 stop QuickPose）。
@@ -1191,7 +1242,7 @@ struct PoseDetectionView: View {
                 }
             }
             .buttonStyle(.borderedProminent)
-            uploadVideoButton(label: "或改為上傳影片偵測")
+            videoImportButtons(primaryLabel: "或改為上傳影片偵測")
         }
     }
 

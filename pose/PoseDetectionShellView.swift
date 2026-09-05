@@ -2,7 +2,7 @@
 //  PoseDetectionShellView.swift
 //  pose
 //
-//  登入後依使用者選擇顯示 QuickPose 原生 overlay、MediaPipe 完整管線，或自訓模型。
+//  登入後三種引擎都進入 PoseDetectionView 完整管線。
 //
 
 import Combine
@@ -30,12 +30,7 @@ struct PoseDetectionShellView: View {
 
     var body: some View {
         Group {
-            switch modeStore.engine {
-            case .trainedModel, .mediaPipe:
-                PoseDetectionView()
-            case .quickPose:
-                QuickPoseBasicDetectionView()
-            }
+            PoseDetectionView()
         }
         .environmentObject(modeStore)
         .sheet(isPresented: $showEngineChooser) {
@@ -89,7 +84,7 @@ private struct EngineChooserSheet: View {
                 } header: {
                     Text("請選擇偵測引擎")
                 } footer: {
-                    Text("之後可在畫面底部或右上角選單隨時切換。MediaPipe 會把骨架存進獨立的 mediapipe.realm。")
+                    Text("三種引擎都可相機／上傳影片，並把節點標好／壞上傳。MediaPipe 存 mediapipe.realm，QuickPose 與自訓模型存 pose.realm。")
                 }
             }
             .navigationTitle("偵測引擎")

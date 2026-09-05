@@ -24,7 +24,10 @@ final class poseTests: XCTestCase {
         XCTAssertTrue(PoseAssessmentEngine.trainedModel.usesTrainedModelPredict)
         XCTAssertFalse(PoseAssessmentEngine.trainedModel.usesRuleBasedAdvice)
 
-        XCTAssertFalse(PoseAssessmentEngine.quickPose.usesFullDetectionPipeline)
+        XCTAssertTrue(PoseAssessmentEngine.quickPose.usesFullDetectionPipeline)
+        XCTAssertTrue(PoseAssessmentEngine.quickPose.usesRuleBasedAdvice)
+        XCTAssertFalse(PoseAssessmentEngine.quickPose.usesTrainedModelPredict)
+        XCTAssertTrue(PoseDatabase.store(for: .quickPose) === PoseDatabase.shared)
     }
 
     func testMediaPipeUsesDedicatedDatabase() {

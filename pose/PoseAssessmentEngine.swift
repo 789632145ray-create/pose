@@ -2,8 +2,8 @@
 //  PoseAssessmentEngine.swift
 //  pose
 //
-//  偵測系統版本：
-//  - QuickPose：輕量骨架 overlay（官方 SDK 原生模式）
+//  偵測系統版本（三種都走完整管線：相機／影片、節點庫、標好壞）：
+//  - QuickPose：輕量骨架 + 規則建議
 //  - MediaPipe：BlazePose Full 骨架 + 規則建議／步態分析
 //  - 自訓模型：後端 RandomForest 好／壞品質辨識
 //
@@ -39,7 +39,7 @@ enum PoseAssessmentEngine: String, CaseIterable, Identifiable, Codable {
     var detail: String {
         switch self {
         case .quickPose:
-            return "官方骨架偵測，即時 FPS 與 overlay"
+            return "完整偵測畫面：相機／影片、步態、節點庫、標好／壞"
         case .mediaPipe:
             return "MediaPipe BlazePose Full 骨架、步態分析與規則建議"
         case .trainedModel:
@@ -62,10 +62,8 @@ enum PoseAssessmentEngine: String, CaseIterable, Identifiable, Codable {
         }
     }
 
-    /// 使用完整偵測管線（相機／影片、步態、節點資料庫）。
-    var usesFullDetectionPipeline: Bool {
-        self != .quickPose
-    }
+    /// 三種引擎都走完整偵測管線（相機／影片、步態、節點資料庫、標好壞）。
+    var usesFullDetectionPipeline: Bool { true }
 
     /// 使用規則式姿勢建議（非後端 ML）。
     var usesRuleBasedAdvice: Bool {

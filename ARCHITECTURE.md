@@ -94,10 +94,10 @@ flowchart TB
 | 根畫面／登入路由 | 未登入顯示 LoginView，登入後進入偵測 | `pose/RootView.swift` |
 | 帳號註冊／登入／登出 | Bearer Token 存 Keychain | `pose/AuthManager.swift`, `pose/LoginView.swift`, `pose/KeychainHelper.swift` |
 | 會員管理 | 修改密碼、個人資料 | `pose/MemberProfileSheet.swift` |
-| 引擎切換 | QuickPose 原生 overlay、MediaPipe Full 管線、自訓模型 | `pose/PoseDetectionShellView.swift`, `pose/PoseAssessmentEngine.swift` |
+| 引擎切換 | QuickPose / MediaPipe / 自訓模型皆走完整管線（相機、影片、節點庫、標好壞） | `pose/PoseDetectionShellView.swift`, `pose/PoseAssessmentEngine.swift` |
 | 即時相機偵測 | FPS、overlay、開始／暫停／倒數 | `pose/PoseDetectionView.swift` |
 | 影片上傳偵測 | PhotosPicker 選檔、逐幀分析 | `pose/PoseDetectionView.swift` |
-| 簡易 SDK 模式 | 僅 QuickPose overlay，不含完整管線 | `pose/QuickPoseBasicDetectionView.swift` |
+| 影片上傳 | 相簿 PhotosPicker 或「檔案」匯入 | `pose/PoseDetectionView.swift` |
 | 伺服器設定 | Debug 本機 / Release Railway HTTPS | `pose/ServerConfig.swift`, `pose/Info.plist` |
 
 **即時 UI 回饋：**

@@ -333,6 +333,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "Pose偵測";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.sports";
 				INFOPLIST_KEY_NSCameraUsageDescription = "需要相機以進行即時姿勢與骨架偵測。";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "需要相簿以選擇影片進行姿勢偵測。";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -367,6 +368,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "Pose偵測";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.sports";
 				INFOPLIST_KEY_NSCameraUsageDescription = "需要相機以進行即時姿勢與骨架偵測。";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "需要相簿以選擇影片進行姿勢偵測。";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
