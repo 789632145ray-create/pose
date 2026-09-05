@@ -43,6 +43,20 @@ final class poseTests: XCTestCase {
         XCTAssertTrue(PoseNodeStoreKind.mediaPipe.uploadPath.contains("mediapipe"))
     }
 
+    func testSwitchingEnginesKeepsSharedPoseRuntime() {
+        XCTAssertTrue(PoseAssessmentEngine.quickPose.usesFullPoseModel)
+        XCTAssertTrue(PoseAssessmentEngine.mediaPipe.usesFullPoseModel)
+        XCTAssertTrue(PoseAssessmentEngine.trainedModel.usesFullPoseModel)
+        for from in PoseAssessmentEngine.allCases {
+            for to in PoseAssessmentEngine.allCases where from != to {
+                XCTAssertFalse(
+                    PoseAssessmentEngine.requiresPoseRuntimeRestart(from: from, to: to),
+                    "\(from.rawValue) → \(to.rawValue) must keep the running overlay session"
+                )
+            }
+        }
+    }
+
     func testLegacyEngineStorageMigration() {
         XCTAssertEqual(PoseAssessmentEngine.resolved(fromStored: "trained"), .trainedModel)
         XCTAssertEqual(PoseAssessmentEngine.resolved(fromStored: "trained_model"), .trainedModel)

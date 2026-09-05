@@ -32,6 +32,7 @@ final class QuickPoseEngine: ObservableObject {
     private(set) var loopActive = false
     /// MediaPipe Full（`.good`）或自訓模型共用完整管線時由此指定模型。
     var assessmentEngine: PoseAssessmentEngine = .trainedModel
+    private var restartTask: Task<Void, Never>?
 
     weak var analysisPipeline: PoseAnalysisPipeline?
     var bodyGaitProfile: BodyGaitProfile?
@@ -54,6 +55,8 @@ final class QuickPoseEngine: ObservableObject {
     }
 
     func stopLoop() {
+        restartTask?.cancel()
+        restartTask = nil
         if loopActive {
             pose.stop()
             loopActive = false
@@ -65,30 +68,20 @@ final class QuickPoseEngine: ObservableObject {
         guard !loopActive else { return }
         loopActive = true
 
-        let features: [QuickPose.Feature]
-        let modelConfig: QuickPose.ModelConfig
-        switch assessmentEngine {
-        case .mediaPipe:
-            // 影片與相機共用全身 overlay；再加 .showPoints() 容易讓 SimulatedCamera 播不穩。
-            features = [.overlay(.wholeBody)]
-            modelConfig = QuickPose.ModelConfig(
-                detailedFaceTracking: false,
-                detailedHandTracking: false,
-                modelComplexity: .good
-            )
-        case .trainedModel:
-            features = [.overlay(.wholeBody)]
-            modelConfig = QuickPose.ModelConfig(
-                detailedFaceTracking: false,
-                detailedHandTracking: false,
-                modelComplexity: .good
-            )
-        case .quickPose:
-            features = [.overlay(.wholeBody)]
-            modelConfig = QuickPose.ModelConfig()
-        }
+        let features: [QuickPose.Feature] = [.overlay(.wholeBody)]
+        // 固定 Full：切換引擎不 reload 模型，骨架線才不會只在第一個引擎出現。
+        let modelConfig = QuickPose.ModelConfig(
+            detailedFaceTracking: false,
+            detailedHandTracking: false,
+            modelComplexity: .good
+        )
 
-        pose.start(features: features, modelConfig: modelConfig) { [weak self] status, image, _, _, landmarks in
+        pose.start(features: features, modelConfig: modelConfig, onStart: { [weak self] in
+            Task { @MainActor in
+                self?.statusHint = ""
+                self?.isEngineStarting = false
+            }
+        }) { [weak self] status, image, _, _, landmarks in
             Task { @MainActor in
                 self?.processFrame(status: status, image: image, landmarks: landmarks)
             }
@@ -97,8 +90,24 @@ final class QuickPoseEngine: ObservableObject {
 
     /// 切換來源 / 倒數結束後：stop 再 start，等同原生模式的「重新 start」。
     func restartLoop() {
-        stopLoop()
-        startLoopIfNeeded()
+        scheduleRestart(hint: "正在重新啟動骨架…")
+    }
+
+    /// 換模型複雜度必須先 stop，稍等再 start，否則 overlay 線條不會再畫。
+    func scheduleRestart(hint: String = "正在切換偵測引擎…") {
+        restartTask?.cancel()
+        if loopActive {
+            pose.stop()
+            loopActive = false
+        }
+        overlayImage = nil
+        isEngineStarting = true
+        statusHint = hint
+        restartTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard let self, !Task.isCancelled else { return }
+            self.startLoopIfNeeded()
+        }
     }
 
     func processFrame(status: QuickPose.Status, image: UIImage?, landmarks: QuickPose.Landmarks?) {
@@ -119,12 +128,20 @@ final class QuickPoseEngine: ObservableObject {
             break
         }
 
-        guard detectionActive else { return }
+        // 骨架線要持續更新；暫停或剛切換引擎時也要畫，否則只會停在第一個模型。
+        if let image {
+            overlayImage = image
+        }
 
-        let img = image
         switch status {
         case .success(let info):
             let fps = "FPS: \(info.fps)"
+            fpsText = fps
+            isEngineStarting = false
+            guard detectionActive else {
+                statusHint = "骨架預覽中，按「開始」才會寫入資料庫"
+                return
+            }
             if let landmarks, let pipeline = analysisPipeline {
                 let posture = PoseAdvice.evaluate(from: landmarks)
                 let gait = PoseGaitAdvisor.gaitAdvice(from: landmarks, profile: bodyGaitProfile)
@@ -144,12 +161,9 @@ final class QuickPoseEngine: ObservableObject {
                     lines: advice.lines,
                     issues: advice.issues
                 )
-                isEngineStarting = false
                 if assessmentEngine.usesTrainedModelPredict {
                     onStreamEnqueue?(nodes, ts)
                 }
-                overlayImage = img
-                fpsText = fps
                 adviceLines = result.lines
                 stepHUD = result.hudSummary
                 recentSteps = result.recentEvents
@@ -157,26 +171,25 @@ final class QuickPoseEngine: ObservableObject {
                 dbNodeCount += savedCount
                 onStepEvents?(result.emittedSteps)
             } else {
-                isEngineStarting = false
-                overlayImage = img
-                fpsText = fps
                 adviceLines = ["偵測中，尚未取得關節資料。"]
             }
 
         case .noPersonFound:
             isEngineStarting = false
-            overlayImage = img
             fpsText = "FPS: —"
-            adviceLines = ["畫面中尚未偵測到人物，請站到鏡頭前。"]
-            analysisPipeline?.reset()
+            if detectionActive {
+                adviceLines = ["畫面中尚未偵測到人物，請站到鏡頭前。"]
+                analysisPipeline?.reset()
+            }
 
         case .sdkValidationError:
             break
 
         @unknown default:
             isEngineStarting = false
-            overlayImage = img
-            adviceLines = ["偵測引擎回報未知狀態，請按「暫停」後再「開始」重試。"]
+            if detectionActive {
+                adviceLines = ["偵測引擎回報未知狀態，請按「暫停」後再「開始」重試。"]
+            }
         }
     }
 
@@ -894,8 +907,10 @@ struct PoseDetectionView: View {
             dbSessionID = nodeDatabase.beginSession(sourceLabel: currentSourceLabel)
             quickPoseEngine.dbNodeCount = 0
         }
-        if quickPoseEngine.loopActive {
-            quickPoseEngine.restartLoop()
+        if PoseAssessmentEngine.requiresPoseRuntimeRestart(from: previous, to: newEngine) {
+            quickPoseEngine.scheduleRestart(hint: "正在切換\(newEngine.title)骨架…")
+        } else {
+            quickPoseEngine.statusHint = "已切換\(newEngine.title)，骨架持續顯示"
         }
     }
 
@@ -990,7 +1005,6 @@ struct PoseDetectionView: View {
         finishDatabaseSession()
         stopStreaming()
         quickPoseEngine.isEngineStarting = false
-        quickPoseEngine.overlayImage = nil
         if fullReset {
             analysisPipeline.reset()
             resetStepUIState()
@@ -1336,6 +1350,7 @@ struct PoseDetectionView: View {
                 .frame(width: w, height: h)
                 .opacity(quickPoseEngine.overlayImage == nil ? 0 : 1)
                 .allowsHitTesting(false)
+                .id("overlay-\(assessmentEngine.rawValue)")
         }
         .id(cameraContentID)
         .frame(width: w, height: h)

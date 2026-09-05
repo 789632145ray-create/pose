@@ -75,6 +75,14 @@ enum PoseAssessmentEngine: String, CaseIterable, Identifiable, Codable {
         self == .trainedModel
     }
 
+    /// 三種引擎共用同一個已啟動的 QuickPose Full 工作階段畫骨架線。
+    var usesFullPoseModel: Bool { true }
+
+    /// 切換引擎只改分析／資料庫／是否呼叫 /predict。stop/start 會讓 overlay 線條只在第一個引擎出現。
+    static func requiresPoseRuntimeRestart(from _: PoseAssessmentEngine, to _: PoseAssessmentEngine) -> Bool {
+        false
+    }
+
     var hudBadgeTitle: String {
         switch self {
         case .quickPose: return "QuickPose 規則"
