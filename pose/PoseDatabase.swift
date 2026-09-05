@@ -184,7 +184,7 @@ final class PoseDatabase {
     func beginSession(sourceLabel: String) -> String {
         let id = UUID().uuidString
         let now = Date()
-        queue.async { [weak self] in
+        queue.sync { [weak self] in
             guard let self, let realm = try? self.openRealm() else { return }
             self.activeSessionID = id
             self.frameCounter = 0
@@ -231,7 +231,7 @@ final class PoseDatabase {
 
     func endSession(totalSteps: Int, leftSteps: Int, rightSteps: Int, avgCadenceBPM: Double?) {
         let now = Date()
-        queue.async { [weak self] in
+        queue.sync { [weak self] in
             guard let self, let sid = self.activeSessionID, let realm = try? self.openRealm() else { return }
             try? realm.write {
                 if let session = realm.object(ofType: RLMPoseSession.self, forPrimaryKey: sid) {

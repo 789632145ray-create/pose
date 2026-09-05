@@ -261,7 +261,7 @@ final class PoseStreamClient {
         rightSteps: Int,
         avgCadenceBPM: Double?,
         frames: [PoseFrameRecord],
-        maxFrames: Int = 600,
+        maxFrames: Int = 240,
         path: String = "/poses"
     ) async -> LabeledUploadResult {
         guard let token = KeychainHelper.read(Self.tokenAccount), !token.isEmpty else {
@@ -288,7 +288,9 @@ final class PoseStreamClient {
         let engine = path.contains("mediapipe") ? "mediapipe" : "pose"
         let body = PoseUploadBody(
             label: label,
-            source_label: sourceLabel,
+            source_label: engine == "mediapipe" && !sourceLabel.hasPrefix("mediapipe")
+                ? "mediapipe｜\(sourceLabel)"
+                : sourceLabel,
             total_steps: totalSteps,
             left_steps: leftSteps,
             right_steps: rightSteps,
@@ -297,23 +299,32 @@ final class PoseStreamClient {
             frames: wire
         )
 
-        do {
-            let first = try await postRaw(path: path, body: body, timeout: 120)
-            if first.1.statusCode == 404, path != "/poses" {
-                let fallback = try await postRaw(path: "/poses", body: body, timeout: 120)
-                return Self.decodeLabeledUpload(
-                    data: fallback.0,
-                    http: fallback.1,
-                    extraSuccessNote: "雲端尚未部署 MediaPipe 專用庫，已改存 pose_sessions"
+        // 正式 Railway 目前只有 /poses；/mediapipe/poses 會 404 或連線失敗，必須改傳到 /poses。
+        let pathsToTry = path == "/poses" ? ["/poses"] : [path, "/poses"]
+        var lastFailure = "上傳失敗"
+        for tryPath in pathsToTry {
+            do {
+                let (data, http) = try await postRaw(path: tryPath, body: body, timeout: 120)
+                if http.statusCode == 404 {
+                    lastFailure = "雲端尚無 \(tryPath)"
+                    continue
+                }
+                let decoded = Self.decodeLabeledUpload(
+                    data: data,
+                    http: http,
+                    extraSuccessNote: tryPath == "/poses" && path != "/poses"
+                        ? "已存到現有 pose_sessions，不必新建 Railway"
+                        : nil
                 )
+                if decoded.success || http.statusCode == 401 {
+                    return decoded
+                }
+                lastFailure = decoded.message
+            } catch {
+                lastFailure = "無法連線 \(baseURL)\(tryPath)：\(error.localizedDescription)"
             }
-            return Self.decodeLabeledUpload(data: first.0, http: first.1)
-        } catch {
-            return LabeledUploadResult(
-                success: false,
-                message: "無法連線 \(baseURL)\(path)：\(error.localizedDescription)"
-            )
         }
+        return LabeledUploadResult(success: false, message: lastFailure)
     }
 
     private static func decodeLabeledUpload(

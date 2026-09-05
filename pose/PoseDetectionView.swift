@@ -69,7 +69,8 @@ final class QuickPoseEngine: ObservableObject {
         let modelConfig: QuickPose.ModelConfig
         switch assessmentEngine {
         case .mediaPipe:
-            features = [.overlay(.wholeBody), .showPoints()]
+            // 影片與相機共用全身 overlay；再加 .showPoints() 容易讓 SimulatedCamera 播不穩。
+            features = [.overlay(.wholeBody)]
             modelConfig = QuickPose.ModelConfig(
                 detailedFaceTracking: false,
                 detailedHandTracking: false,
@@ -316,6 +317,7 @@ struct PoseDetectionView: View {
 
     @State private var detectionSource: DetectionSource = .liveCamera
     @State private var pickedItem: PhotosPickerItem?
+    @State private var showPhotosPicker = false
     @State private var showFileImporter = false
     @State private var isLoadingVideo = false
     @State private var showSummary = false
@@ -483,6 +485,7 @@ struct PoseDetectionView: View {
             .onChange(of: pickedItem) { _, newItem in
                 Task { await handlePickedItem(newItem) }
             }
+            .photosPicker(isPresented: $showPhotosPicker, selection: $pickedItem, matching: .videos)
             .fileImporter(
                 isPresented: $showFileImporter,
                 allowedContentTypes: [.movie, .mpeg4Movie, .quickTimeMovie, .avi],
@@ -802,33 +805,41 @@ struct PoseDetectionView: View {
     @MainActor
     @ViewBuilder
     private func videoImportButtons(primaryLabel: String) -> some View {
-        HStack(spacing: 10) {
-            PhotosPicker(selection: $pickedItem, matching: .videos, photoLibrary: .shared()) {
-                HStack(spacing: 8) {
-                    if isLoadingVideo {
-                        ProgressView().tint(.white)
+        VStack(spacing: 8) {
+            Text("影片在手機本機分析，不需要 Railway")
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.7))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 10) {
+                Button {
+                    showPhotosPicker = true
+                } label: {
+                    HStack(spacing: 8) {
+                        if isLoadingVideo {
+                            ProgressView().tint(.white)
+                        }
+                        Label(primaryLabel, systemImage: "film.fill")
+                            .font(.subheadline.weight(.semibold))
                     }
-                    Label(primaryLabel, systemImage: "film.fill")
-                        .font(.subheadline.weight(.semibold))
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.purple)
-            .disabled(isLoadingVideo)
-
-            Button {
-                showFileImporter = true
-            } label: {
-                Label("檔案", systemImage: "folder.fill")
-                    .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.purple)
+                .disabled(isLoadingVideo)
+
+                Button {
+                    showFileImporter = true
+                } label: {
+                    Label("檔案", systemImage: "folder.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                }
+                .buttonStyle(.bordered)
+                .tint(.purple)
+                .disabled(isLoadingVideo)
             }
-            .buttonStyle(.bordered)
-            .tint(.purple)
-            .disabled(isLoadingVideo)
         }
     }
 
@@ -1366,11 +1377,25 @@ struct PoseDetectionView: View {
     }
 
     private func poseHUDOverlay(safeTop: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        HStack(alignment: .top, spacing: 10) {
             poseStatusBadge
-            appMenuButton
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 8) {
+                appMenuButton
+                Button {
+                    showPhotosPicker = true
+                } label: {
+                    Label("選影片", systemImage: "film.fill")
+                        .font(.caption.weight(.bold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.purple)
+                .disabled(isLoadingVideo)
+            }
         }
-        .padding(.leading, 12)
+        .padding(.horizontal, 12)
         .padding(.top, safeTop + 8)
         .zIndex(2)
     }
@@ -1964,7 +1989,7 @@ private struct PoseSessionDetailView: View {
 
     var body: some View {
         let nodes = database.firstFrameNodes(sessionID: record.id)
-        let canLabel = record.frameCount > 0 && record.endedAt != nil
+        let canLabel = record.frameCount > 0 || record.nodeCount > 0 || !nodes.isEmpty
         return List {
             Section {
                 LabeledContent("開始時間", value: PoseSessionDetailView.dateFormatter.string(from: record.startedAt))
@@ -1982,7 +2007,7 @@ private struct PoseSessionDetailView: View {
                 Text("此次偵測")
             } footer: {
                 Text(database.kind == .mediaPipe
-                     ? "此筆資料來自 MediaPipe 獨立庫（mediapipe.realm）。標記後會上傳到雲端 mediapipe_sessions。"
+                     ? "MediaPipe 節點存在本機 mediapipe.realm。標好／壞會傳到現有 Railway 的 /poses，不必新建專案。"
                      : "在此標記好 / 壞並上傳至雲端，即可用 train.py 訓練模型。")
             }
 
@@ -2010,7 +2035,7 @@ private struct PoseSessionDetailView: View {
                 }
             } else {
                 Section {
-                    Text("偵測進行中或尚無節點，請暫停後再標記。")
+                    Text("尚無節點可標記。請先開始偵測，暫停後再打開資料庫。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -2046,8 +2071,13 @@ private struct PoseSessionDetailView: View {
 
     private func uploadLabel(_ label: String) {
         statusMessage = nil
-        isUploading = true
         let frames = database.allFrames(sessionID: record.id)
+        guard !frames.isEmpty else {
+            isUploadError = true
+            statusMessage = "此筆尚無節點。請回到偵測畫面按「暫停」後再上傳。"
+            return
+        }
+        isUploading = true
         Task {
             let result = await stream.uploadLabeledSession(
                 label: label,
