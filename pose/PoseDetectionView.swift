@@ -42,6 +42,7 @@ final class QuickPoseEngine: ObservableObject {
     @Published var fpsText = "FPS: —"
     @Published var adviceLines: [String] = ["正在檢查相機權限…"]
     @Published var overlayImage: UIImage?
+    @Published var previewNodes: [PoseNode] = []
     @Published var isEngineStarting = false
     @Published var statusHint = ""
     @Published var stepHUD = "步數 L:0 R:0 總:0"
@@ -132,6 +133,12 @@ final class QuickPoseEngine: ObservableObject {
         if let image {
             overlayImage = image
         }
+        if let landmarks {
+            let nodes = PoseNodeExtractor.extractAll(from: landmarks)
+            if nodes.contains(where: MediaPipeSkeletonGraph.isVisible) {
+                previewNodes = nodes
+            }
+        }
 
         switch status {
         case .success(let info):
@@ -195,6 +202,7 @@ final class QuickPoseEngine: ObservableObject {
 
     func resetSessionUI() {
         overlayImage = nil
+        previewNodes = []
         isEngineStarting = false
         dbNodeCount = 0
         recentSteps = []
@@ -387,6 +395,16 @@ struct PoseDetectionView: View {
         switch detectionSource {
         case .liveCamera: return "live-camera"
         case .video(let url): return "video-\(url.absoluteString)"
+        }
+    }
+
+    /// 前鏡頭預覽是鏡像，節點 x 要翻轉才會對上身體。
+    private var skeletonFlipsHorizontally: Bool {
+        switch detectionSource {
+        case .liveCamera:
+            return !ProcessInfo.processInfo.isiOSAppOnMac
+        case .video:
+            return false
         }
     }
 
@@ -1350,7 +1368,14 @@ struct PoseDetectionView: View {
                 .frame(width: w, height: h)
                 .opacity(quickPoseEngine.overlayImage == nil ? 0 : 1)
                 .allowsHitTesting(false)
-                .id("overlay-\(assessmentEngine.rawValue)")
+
+            if assessmentEngine == .mediaPipe {
+                MediaPipeSkeletonOverlay(
+                    nodes: quickPoseEngine.previewNodes,
+                    flipHorizontally: skeletonFlipsHorizontally
+                )
+                .frame(width: w, height: h)
+            }
         }
         .id(cameraContentID)
         .frame(width: w, height: h)

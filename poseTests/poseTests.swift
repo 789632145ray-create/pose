@@ -43,6 +43,29 @@ final class poseTests: XCTestCase {
         XCTAssertTrue(PoseNodeStoreKind.mediaPipe.uploadPath.contains("mediapipe"))
     }
 
+    func testMediaPipeSkeletonConnectionsUseExtractedJoints() {
+        let known = Set([
+            "nose", "shoulder_mid", "hip_mid",
+            "left_eye_inner", "left_eye", "left_eye_outer", "left_ear", "left_mouth",
+            "right_eye_inner", "right_eye", "right_eye_outer", "right_ear", "right_mouth",
+            "left_shoulder", "left_elbow", "left_wrist", "left_pinky", "left_index", "left_thumb",
+            "right_shoulder", "right_elbow", "right_wrist", "right_pinky", "right_index", "right_thumb",
+            "left_hip", "left_knee", "left_ankle", "left_heel", "left_foot_index",
+            "right_hip", "right_knee", "right_ankle", "right_heel", "right_foot_index"
+        ])
+        XCTAssertFalse(MediaPipeSkeletonGraph.connections.isEmpty)
+        for (a, b) in MediaPipeSkeletonGraph.connections {
+            XCTAssertTrue(known.contains(a), "unknown joint \(a)")
+            XCTAssertTrue(known.contains(b), "unknown joint \(b)")
+        }
+        XCTAssertTrue(MediaPipeSkeletonGraph.isVisible(
+            PoseNode(joint: "nose", x: 0.5, y: 0.2, z: 0, visibility: 0.9, presence: 0.9)
+        ))
+        XCTAssertFalse(MediaPipeSkeletonGraph.isVisible(
+            PoseNode(joint: "nose", x: 0.5, y: 0.2, z: 0, visibility: 0.1, presence: 0.9)
+        ))
+    }
+
     func testSwitchingEnginesKeepsSharedPoseRuntime() {
         XCTAssertTrue(PoseAssessmentEngine.quickPose.usesFullPoseModel)
         XCTAssertTrue(PoseAssessmentEngine.mediaPipe.usesFullPoseModel)
