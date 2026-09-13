@@ -123,9 +123,15 @@ struct BodyGaitProfile: Equatable {
 // MARK: - 即時步態建議
 
 enum PoseGaitAdvisor {
-    /// 走路核心（對側擺臂、腳跟→腳尖）＋ 依個體化檔案追加的步態提示。
-    static func gaitAdvice(from landmarks: QuickPose.Landmarks, profile: BodyGaitProfile?) -> (lines: [String], issues: Set<PoseIssueCode>) {
-        let form = WalkingFormAdvisor.evaluate(from: landmarks)
+    /// 走路或跑步核心 ＋ 依個體化檔案追加的步態提示。
+    static func gaitAdvice(
+        from landmarks: QuickPose.Landmarks,
+        profile: BodyGaitProfile?,
+        activity: GaitActivityMode = .walking
+    ) -> (lines: [String], issues: Set<PoseIssueCode>) {
+        let form = activity == .running
+            ? RunningFormAdvisor.evaluate(from: landmarks)
+            : WalkingFormAdvisor.evaluate(from: landmarks)
         var lines = form.lines
         var issues = form.issues
         guard let profile else { return (lines, issues) }
@@ -206,7 +212,10 @@ enum PoseGaitAdvisor {
 
         let onlyCoreOrPraise = issues == formIssues && (
             lines == WalkingFormAdvisor.corePrincipleLines
-            || lines.contains(where: { $0.contains("對側擺臂") || $0.contains("腳跟先著地") })
+            || lines.contains(where: {
+                $0.contains("對側擺臂") || $0.contains("腳跟先著地")
+                    || $0.contains("微前傾") || $0.contains("中足") || $0.contains("手肘約")
+            })
         )
         if onlyCoreOrPraise {
             if profile.isMiddleAgedPlus {
@@ -242,9 +251,32 @@ struct GaitSessionMetrics {
     var incompleteToeOffFrames: Int = 0
     var goodArmSwingFrames: Int = 0
     var goodFootRollFrames: Int = 0
+    var runningFormFrames: Int = 0
+    var waistHingeFrames: Int = 0
+    var insufficientLeanFrames: Int = 0
+    var excessiveLeanFrames: Int = 0
+    var pelvisUnstableFrames: Int = 0
+    var runningOverstrideFrames: Int = 0
+    var heelStrikeRunFrames: Int = 0
+    var elbowAngleOffFrames: Int = 0
+    var armCrossMidlineFrames: Int = 0
+    var goodRunningLeanFrames: Int = 0
+    var goodRunningCoreFrames: Int = 0
+    var goodRunningFootFrames: Int = 0
+    var goodRunningArmFrames: Int = 0
 
-    mutating func ingest(landmarks: QuickPose.Landmarks, profile: BodyGaitProfile?) {
-        WalkingFormAdvisor.accumulate(metrics: &self, snapshot: WalkingFormAdvisor.snapshot(from: landmarks))
+    mutating func ingest(
+        landmarks: QuickPose.Landmarks,
+        profile: BodyGaitProfile?,
+        activity: GaitActivityMode = .walking
+    ) {
+        let snapshot = WalkingFormAdvisor.snapshot(from: landmarks)
+        switch activity {
+        case .walking:
+            WalkingFormAdvisor.accumulate(metrics: &self, snapshot: snapshot)
+        case .running:
+            RunningFormAdvisor.accumulate(metrics: &self, snapshot: snapshot)
+        }
         guard let profile else { return }
 
         func ok(_ p: QuickPose.Point3d) -> Bool {

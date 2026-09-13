@@ -16,14 +16,13 @@ import QuickPoseCore
 import QuickPoseSwiftUI
 
 private enum PauseAdvice {
-    static let lines: [String] = [
-        "走路正確姿勢核心：",
-        "手臂自然下垂，隨著對側腳步前後擺動，幅度不宜過大。",
-        "腳跟先著地，力量順勢平穩地過渡到腳掌，最後由腳尖蹬地推動身體前進。",
-        "偵測已暫停。建議你：",
-        "做 2～3 次深長呼吸，放鬆肩膀與下顎。",
-        "若剛才覺得站不穩，可輕輕活動踝、膝與髖，再按「開始」繼續。"
-    ]
+    static func lines(for activity: GaitActivityMode) -> [String] {
+        [activity.coreTitle + "："] + activity.corePrincipleLines + [
+            "偵測已暫停。建議你：",
+            "做 2～3 次深長呼吸，放鬆肩膀與下顎。",
+            "若剛才覺得站不穩，可輕輕活動踝、膝與髖，再按「開始」繼續。"
+        ]
+    }
 }
 
 /// QuickPose 引擎 + 影格處理（class 持有狀態，避免 onFrame 閉包捕獲 struct 導致永遠讀到舊的 detectionActive）。
@@ -35,6 +34,7 @@ final class QuickPoseEngine: ObservableObject {
     private(set) var loopActive = false
     /// MediaPipe Full（`.good`）或自訓模型共用完整管線時由此指定模型。
     var assessmentEngine: PoseAssessmentEngine = .trainedModel
+    var activityMode: GaitActivityMode = .walking
     private var restartTask: Task<Void, Never>?
 
     weak var analysisPipeline: PoseAnalysisPipeline?
@@ -154,7 +154,11 @@ final class QuickPoseEngine: ObservableObject {
             }
             if let landmarks, let pipeline = analysisPipeline {
                 let posture = PoseAdvice.evaluate(from: landmarks)
-                let gait = PoseGaitAdvisor.gaitAdvice(from: landmarks, profile: bodyGaitProfile)
+                let gait = PoseGaitAdvisor.gaitAdvice(
+                    from: landmarks,
+                    profile: bodyGaitProfile,
+                    activity: activityMode
+                )
                 var mergedIssues = posture.issues
                 mergedIssues.formUnion(gait.issues)
                 var mergedLines = posture.lines
@@ -500,11 +504,16 @@ struct PoseDetectionView: View {
             .onAppear {
                 refreshCameraGate()
                 syncAssessmentEngine()
+                syncActivityMode()
                 wireQuickPoseEngineCallbacks()
                 syncBodyGaitProfile()
             }
             .onChange(of: modeStore.engine) { _, newEngine in
                 handleAssessmentEngineChange(newEngine)
+            }
+            .onChange(of: modeStore.activity) { _, _ in
+                syncActivityMode()
+                if isPaused { applyPausedIdleState() }
             }
             .onChange(of: auth.userProfile) { _, _ in
                 syncBodyGaitProfile()
@@ -659,6 +668,7 @@ struct PoseDetectionView: View {
     private func bottomPanel(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             DetectionEnginePickerRow()
+            GaitActivityPickerRow()
             bottomControls
 
             Button {
@@ -900,6 +910,7 @@ struct PoseDetectionView: View {
     @MainActor
     private func wireQuickPoseEngineCallbacks() {
         syncAssessmentEngine()
+        syncActivityMode()
         quickPoseEngine.analysisPipeline = analysisPipeline
         syncBodyGaitProfile()
         quickPoseEngine.onStreamEnqueue = { [stream] nodes, ts in
@@ -913,6 +924,13 @@ struct PoseDetectionView: View {
     @MainActor
     private func syncAssessmentEngine() {
         quickPoseEngine.assessmentEngine = assessmentEngine
+    }
+
+    @MainActor
+    private func syncActivityMode() {
+        let activity = modeStore.activity
+        quickPoseEngine.activityMode = activity
+        analysisPipeline.activityMode = activity
     }
 
     @MainActor
@@ -1359,7 +1377,7 @@ struct PoseDetectionView: View {
             case .liveCamera: return 0.46
             }
         }()
-        return min(max(height * ratio, 340), 460)
+        return min(max(height * ratio, 370), 500)
     }
 
     @ViewBuilder
@@ -1448,6 +1466,9 @@ struct PoseDetectionView: View {
             Text(assessmentEngine.hudBadgeTitle)
                 .font(.caption.weight(.bold))
                 .foregroundStyle(assessmentEngine == .mediaPipe ? .mint : .orange)
+            Text(modeStore.activity.coreTitle)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(modeStore.activity == .running ? .orange : .cyan)
             Text(quickPoseEngine.fpsText)
                 .font(.system(size: 16, weight: .semibold, design: .rounded))
                 .foregroundStyle(.white)
@@ -1541,11 +1562,11 @@ struct PoseDetectionView: View {
         case .liveCamera:
             quickPoseEngine.adviceLines = [
                 "\(assessmentEngine.hudBadgeTitle) 已暫停。請按「開始」，倒數 5 秒後開始偵測。"
-            ] + WalkingFormAdvisor.corePrincipleLines
+            ] + modeStore.activity.corePrincipleLines
         case .video:
             quickPoseEngine.adviceLines = [
                 "影片已載入（\(assessmentEngine.hudBadgeTitle)）。請按「開始」，倒數 \(Self.videoCountdownSeconds) 秒後開始偵測。"
-            ] + WalkingFormAdvisor.corePrincipleLines
+            ] + modeStore.activity.corePrincipleLines
         }
     }
 
@@ -1601,9 +1622,9 @@ struct PoseDetectionView: View {
         pauseDetectionProcessing(fullReset: true)
         isPaused = true
         quickPoseEngine.fpsText = "FPS: —（已暫停）"
-        quickPoseEngine.adviceLines = PauseAdvice.lines
+        quickPoseEngine.adviceLines = PauseAdvice.lines(for: modeStore.activity)
         if historySavedForSession {
-            quickPoseEngine.adviceLines = ["偵測已暫停，摘要已存入歷史紀錄。"] + PauseAdvice.lines
+            quickPoseEngine.adviceLines = ["偵測已暫停，摘要已存入歷史紀錄。"] + PauseAdvice.lines(for: modeStore.activity)
         }
         quickPoseEngine.statusHint = ""
     }

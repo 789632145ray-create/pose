@@ -11,12 +11,21 @@ import SwiftUI
 @MainActor
 final class DetectionModeStore: ObservableObject {
     @AppStorage("poseDetectionEngine") private var engineRaw = PoseAssessmentEngine.trainedModel.rawValue
+    @AppStorage("poseGaitActivity") private var activityRaw = GaitActivityMode.walking.rawValue
 
     var engine: PoseAssessmentEngine {
         get { PoseAssessmentEngine.resolved(fromStored: engineRaw) }
         set {
             engineRaw = newValue.rawValue
             newValue.save()
+            objectWillChange.send()
+        }
+    }
+
+    var activity: GaitActivityMode {
+        get { GaitActivityMode.resolved(fromStored: activityRaw) }
+        set {
+            activityRaw = newValue.rawValue
             objectWillChange.send()
         }
     }
@@ -140,6 +149,39 @@ struct DetectionEnginePickerRow: View {
         case .quickPose: return .cyan
         case .mediaPipe: return .mint
         case .trainedModel: return .indigo
+        }
+    }
+}
+
+struct GaitActivityPickerRow: View {
+    @EnvironmentObject private var modeStore: DetectionModeStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("活動")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.75))
+            HStack(spacing: 6) {
+                ForEach(GaitActivityMode.allCases) { mode in
+                    let selected = modeStore.activity == mode
+                    Button {
+                        modeStore.activity = mode
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: mode.systemImage)
+                                .font(.caption.weight(.semibold))
+                            Text(mode.title)
+                                .font(.caption.weight(.bold))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(selected ? (mode == .running ? .orange : .cyan) : .gray)
+                    .accessibilityLabel(mode.title)
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                }
+            }
         }
     }
 }

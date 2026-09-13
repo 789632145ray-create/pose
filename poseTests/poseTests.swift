@@ -147,6 +147,114 @@ final class poseTests: XCTestCase {
         )
     }
 
+    func testRunningFormCorePrincipleLines() {
+        XCTAssertEqual(GaitActivityMode.running.coreTitle, "跑步正確姿勢核心")
+        XCTAssertEqual(GaitActivityMode.resolved(fromStored: "running"), .running)
+        XCTAssertEqual(GaitActivityMode.resolved(fromStored: "nope"), .walking)
+        XCTAssertEqual(RunningFormAdvisor.corePrincipleLines.count, 4)
+        XCTAssertTrue(RunningFormAdvisor.corePrincipleLines[0].contains("約 10 度"))
+        XCTAssertTrue(RunningFormAdvisor.corePrincipleLines[2].contains("過度跨步"))
+        XCTAssertTrue(RunningFormAdvisor.corePrincipleLines[3].contains("90 度"))
+        XCTAssertEqual(PoseIssueCode.waistHingeLean.summaryDescription, "從腰部彎曲前傾")
+        XCTAssertEqual(PoseIssueCode.heelStrikeWhileRunning.summaryDescription, "跑步用腳跟著地")
+        XCTAssertEqual(PoseIssueCode.armCrossMidline.summaryDescription, "擺臂越過身體中線")
+    }
+
+    func testRunningFormDetectsGoodMidfootAndLean() {
+        let result = RunningFormAdvisor.evaluate(Self.goodSideViewRun())
+        XCTAssertTrue(result.issues.isEmpty, "\(result.issues)")
+        XCTAssertTrue(result.lines.contains(where: { $0.contains("微前傾") }))
+        XCTAssertTrue(result.lines.contains(where: { $0.contains("中足") }))
+    }
+
+    func testRunningFormDetectsWaistHingeAndOverstride() {
+        var snapshot = Self.goodSideViewRun()
+        snapshot.leftShoulder.x = 0.62
+        snapshot.rightShoulder.x = 0.66
+        snapshot.leftHip.x = 0.48
+        snapshot.rightHip.x = 0.52
+        snapshot.leftAnkle.x = 0.48
+        snapshot.rightAnkle.x = 0.50
+        let hinge = RunningFormAdvisor.evaluate(snapshot)
+        XCTAssertTrue(hinge.issues.contains(.waistHingeLean))
+
+        snapshot = Self.goodSideViewRun()
+        snapshot.rightAnkle.x = 0.72
+        let over = RunningFormAdvisor.evaluate(snapshot)
+        XCTAssertTrue(over.issues.contains(.overStriding))
+    }
+
+    func testRunningFormDetectsHeelStrikeAndCrossedArms() {
+        var snapshot = Self.goodSideViewRun()
+        snapshot.rightHeel.y = 0.86
+        snapshot.rightFootIndex.y = 0.78
+        snapshot.rightAnkle.y = 0.84
+        let heel = RunningFormAdvisor.evaluate(snapshot)
+        XCTAssertTrue(heel.issues.contains(.heelStrikeWhileRunning))
+
+        snapshot = Self.frontViewRunArmsCrossed()
+        let arms = RunningFormAdvisor.evaluate(snapshot)
+        XCTAssertTrue(arms.issues.contains(.armCrossMidline))
+        XCTAssertTrue(arms.issues.contains(.elbowAngleOff))
+    }
+
+    func testRunningFormElbowAngleHelper() {
+        let shoulder = WalkingJointSample.visible(x: 0.50, y: 0.20)
+        let elbow = WalkingJointSample.visible(x: 0.50, y: 0.32)
+        let wrist = WalkingJointSample.visible(x: 0.62, y: 0.32)
+        let angle = RunningFormAdvisor.elbowAngleDegrees(shoulder: shoulder, elbow: elbow, wrist: wrist)
+        XCTAssertNotNil(angle)
+        XCTAssertEqual(angle!, 90, accuracy: 2)
+    }
+
+    func testRunningFormSessionSummaryIncludesCore() {
+        var metrics = GaitSessionMetrics()
+        for _ in 0..<12 {
+            RunningFormAdvisor.accumulate(metrics: &metrics, snapshot: Self.goodSideViewRun())
+        }
+        let summary = RunningFormAdvisor.sessionSummary(metrics: metrics)
+        XCTAssertTrue(summary.contains(RunningFormAdvisor.corePrincipleLines[0]))
+        XCTAssertTrue(summary.contains(where: { $0.contains("符合正確跑步姿勢") }))
+    }
+
+    private static func goodSideViewRun() -> WalkingFormSnapshot {
+        WalkingFormSnapshot(
+            leftShoulder: .visible(x: 0.55, y: 0.28),
+            rightShoulder: .visible(x: 0.59, y: 0.28),
+            leftElbow: .visible(x: 0.53, y: 0.40),
+            rightElbow: .visible(x: 0.57, y: 0.40),
+            leftWrist: .visible(x: 0.65, y: 0.42),
+            rightWrist: .visible(x: 0.45, y: 0.42),
+            leftHip: .visible(x: 0.50, y: 0.54),
+            rightHip: .visible(x: 0.54, y: 0.54),
+            leftAnkle: .visible(x: 0.42, y: 0.78),
+            rightAnkle: .visible(x: 0.52, y: 0.82),
+            leftHeel: .visible(x: 0.40, y: 0.76),
+            rightHeel: .visible(x: 0.51, y: 0.83),
+            leftFootIndex: .visible(x: 0.45, y: 0.80),
+            rightFootIndex: .visible(x: 0.54, y: 0.83)
+        )
+    }
+
+    private static func frontViewRunArmsCrossed() -> WalkingFormSnapshot {
+        WalkingFormSnapshot(
+            leftShoulder: .visible(x: 0.38, y: 0.28),
+            rightShoulder: .visible(x: 0.62, y: 0.28),
+            leftElbow: .visible(x: 0.30, y: 0.32),
+            rightElbow: .visible(x: 0.70, y: 0.32),
+            leftWrist: .visible(x: 0.58, y: 0.30),
+            rightWrist: .visible(x: 0.42, y: 0.30),
+            leftHip: .visible(x: 0.44, y: 0.55),
+            rightHip: .visible(x: 0.56, y: 0.55),
+            leftAnkle: .visible(x: 0.45, y: 0.80),
+            rightAnkle: .visible(x: 0.55, y: 0.82),
+            leftHeel: .visible(x: 0.44, y: 0.82),
+            rightHeel: .visible(x: 0.55, y: 0.83),
+            leftFootIndex: .visible(x: 0.46, y: 0.82),
+            rightFootIndex: .visible(x: 0.56, y: 0.83)
+        )
+    }
+
     func testLegacyEngineStorageMigration() {
         XCTAssertEqual(PoseAssessmentEngine.resolved(fromStored: "trained"), .trainedModel)
         XCTAssertEqual(PoseAssessmentEngine.resolved(fromStored: "trained_model"), .trainedModel)
