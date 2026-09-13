@@ -80,6 +80,73 @@ final class poseTests: XCTestCase {
         }
     }
 
+    func testWalkingFormCorePrincipleLines() {
+        XCTAssertEqual(WalkingFormAdvisor.corePrincipleLines, [
+            "手臂自然下垂，隨著對側腳步前後擺動，幅度不宜過大。",
+            "腳跟先著地，力量順勢平穩地過渡到腳掌，最後由腳尖蹬地推動身體前進。"
+        ])
+        XCTAssertEqual(PoseIssueCode.ipsilateralArmSwing.summaryDescription, "同側擺臂（未對側配合）")
+        XCTAssertEqual(PoseIssueCode.forefootStrike.summaryDescription, "腳尖／前腳掌先著地")
+        XCTAssertEqual(PoseIssueCode.incompleteToeOff.summaryDescription, "腳尖蹬地不足")
+    }
+
+    func testWalkingFormDetectsContralateralSwingAndHeelToe() {
+        let result = WalkingFormAdvisor.evaluate(Self.goodSideViewStride())
+        XCTAssertTrue(result.issues.isEmpty, "\(result.issues)")
+        XCTAssertTrue(result.lines.contains(where: { $0.contains("對側擺臂") }))
+        XCTAssertTrue(result.lines.contains(where: { $0.contains("腳跟先著地") }))
+    }
+
+    func testWalkingFormDetectsIpsilateralArmSwing() {
+        var snapshot = Self.goodSideViewStride()
+        snapshot.leftWrist.x = 0.38
+        snapshot.rightWrist.x = 0.66
+        let result = WalkingFormAdvisor.evaluate(snapshot)
+        XCTAssertTrue(result.issues.contains(.ipsilateralArmSwing))
+        XCTAssertTrue(result.lines.contains(where: { $0.contains("對側擺臂") || $0.contains("同側") }))
+    }
+
+    func testWalkingFormDetectsRaisedArmsAndForefootStrike() {
+        var snapshot = Self.goodSideViewStride()
+        snapshot.leftWrist.y = 0.22
+        snapshot.rightWrist.y = 0.22
+        snapshot.rightHeel.y = 0.70
+        snapshot.rightFootIndex.y = 0.82
+        let result = WalkingFormAdvisor.evaluate(snapshot)
+        XCTAssertTrue(result.issues.contains(.raisedArms))
+        XCTAssertTrue(result.issues.contains(.forefootStrike))
+    }
+
+    func testWalkingFormSessionSummaryIncludesCore() {
+        var metrics = GaitSessionMetrics()
+        for _ in 0..<12 {
+            WalkingFormAdvisor.accumulate(metrics: &metrics, snapshot: Self.goodSideViewStride())
+        }
+        let summary = WalkingFormAdvisor.sessionSummary(metrics: metrics)
+        XCTAssertTrue(summary.contains(WalkingFormAdvisor.corePrincipleLines[0]))
+        XCTAssertTrue(summary.contains(WalkingFormAdvisor.corePrincipleLines[1]))
+        XCTAssertTrue(summary.contains(where: { $0.contains("符合正確走路姿勢") }))
+    }
+
+    private static func goodSideViewStride() -> WalkingFormSnapshot {
+        WalkingFormSnapshot(
+            leftShoulder: .visible(x: 0.47, y: 0.30),
+            rightShoulder: .visible(x: 0.53, y: 0.30),
+            leftElbow: .visible(x: 0.44, y: 0.42),
+            rightElbow: .visible(x: 0.56, y: 0.42),
+            leftWrist: .visible(x: 0.62, y: 0.52),
+            rightWrist: .visible(x: 0.40, y: 0.52),
+            leftHip: .visible(x: 0.48, y: 0.55),
+            rightHip: .visible(x: 0.52, y: 0.55),
+            leftAnkle: .visible(x: 0.38, y: 0.76),
+            rightAnkle: .visible(x: 0.64, y: 0.80),
+            leftHeel: .visible(x: 0.36, y: 0.70),
+            rightHeel: .visible(x: 0.62, y: 0.82),
+            leftFootIndex: .visible(x: 0.41, y: 0.80),
+            rightFootIndex: .visible(x: 0.66, y: 0.78)
+        )
+    }
+
     func testLegacyEngineStorageMigration() {
         XCTAssertEqual(PoseAssessmentEngine.resolved(fromStored: "trained"), .trainedModel)
         XCTAssertEqual(PoseAssessmentEngine.resolved(fromStored: "trained_model"), .trainedModel)

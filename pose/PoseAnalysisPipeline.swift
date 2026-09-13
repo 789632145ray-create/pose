@@ -262,6 +262,11 @@ enum PoseIssueCode: Hashable {
     case limitedHipExtension
     case trunkInstability
     case forwardStoop
+    case raisedArms
+    case excessiveArmSwing
+    case ipsilateralArmSwing
+    case forefootStrike
+    case incompleteToeOff
 
     var summaryDescription: String {
         switch self {
@@ -276,6 +281,11 @@ enum PoseIssueCode: Hashable {
         case .limitedHipExtension: return "髖伸展不足"
         case .trunkInstability: return "軀幹偏移／平衡不穩"
         case .forwardStoop: return "上背或頭部前傾"
+        case .raisedArms: return "手臂未自然下垂"
+        case .excessiveArmSwing: return "擺臂幅度過大"
+        case .ipsilateralArmSwing: return "同側擺臂（未對側配合）"
+        case .forefootStrike: return "腳尖／前腳掌先著地"
+        case .incompleteToeOff: return "腳尖蹬地不足"
         }
     }
 }
@@ -368,6 +378,8 @@ final class PoseAnalysisPipeline {
         if !bpms.isEmpty, let avg = avgCadence {
             out.append(String(format: "平均步頻：%.0f bpm", avg))
         }
+
+        out.append(contentsOf: WalkingFormAdvisor.sessionSummary(metrics: gaitMetrics))
 
         if let profile = bodyProfile, let avg = avgCadence {
             let personalized = GaitPersonalizationSummary.lines(

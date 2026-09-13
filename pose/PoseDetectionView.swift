@@ -17,6 +17,9 @@ import QuickPoseSwiftUI
 
 private enum PauseAdvice {
     static let lines: [String] = [
+        "走路正確姿勢核心：",
+        "手臂自然下垂，隨著對側腳步前後擺動，幅度不宜過大。",
+        "腳跟先著地，力量順勢平穩地過渡到腳掌，最後由腳尖蹬地推動身體前進。",
         "偵測已暫停。建議你：",
         "做 2～3 次深長呼吸，放鬆肩膀與下顎。",
         "若剛才覺得站不穩，可輕輕活動踝、膝與髖，再按「開始」繼續。"
@@ -1536,9 +1539,13 @@ struct PoseDetectionView: View {
         quickPoseEngine.fpsText = "FPS: —（已暫停）"
         switch detectionSource {
         case .liveCamera:
-            quickPoseEngine.adviceLines = ["\(assessmentEngine.hudBadgeTitle) 已暫停。請按「開始」，倒數 5 秒後開始偵測。"]
+            quickPoseEngine.adviceLines = [
+                "\(assessmentEngine.hudBadgeTitle) 已暫停。請按「開始」，倒數 5 秒後開始偵測。"
+            ] + WalkingFormAdvisor.corePrincipleLines
         case .video:
-            quickPoseEngine.adviceLines = ["影片已載入（\(assessmentEngine.hudBadgeTitle)）。請按「開始」，倒數 \(Self.videoCountdownSeconds) 秒後開始偵測。"]
+            quickPoseEngine.adviceLines = [
+                "影片已載入（\(assessmentEngine.hudBadgeTitle)）。請按「開始」，倒數 \(Self.videoCountdownSeconds) 秒後開始偵測。"
+            ] + WalkingFormAdvisor.corePrincipleLines
         }
     }
 

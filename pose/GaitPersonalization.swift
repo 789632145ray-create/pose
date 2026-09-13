@@ -123,9 +123,12 @@ struct BodyGaitProfile: Equatable {
 // MARK: - 即時步態建議
 
 enum PoseGaitAdvisor {
-    /// 在既有姿勢建議之外，依個體化檔案追加步態相關即時提示。
+    /// 走路核心（對側擺臂、腳跟→腳尖）＋ 依個體化檔案追加的步態提示。
     static func gaitAdvice(from landmarks: QuickPose.Landmarks, profile: BodyGaitProfile?) -> (lines: [String], issues: Set<PoseIssueCode>) {
-        guard let profile else { return ([], []) }
+        let form = WalkingFormAdvisor.evaluate(from: landmarks)
+        var lines = form.lines
+        var issues = form.issues
+        guard let profile else { return (lines, issues) }
 
         func ok(_ p: QuickPose.Point3d) -> Bool {
             p.visibility > 0.35 && p.presence > 0.35
@@ -133,12 +136,11 @@ enum PoseGaitAdvisor {
 
         let lh = landmarks.landmark(forBody: .hip(side: .left))
         let rh = landmarks.landmark(forBody: .hip(side: .right))
-        guard ok(lh), ok(rh) else { return ([], []) }
+        guard ok(lh), ok(rh) else { return (lines, issues) }
 
         let hipMidX = (lh.x + rh.x) / 2
         let pelvisY = (lh.y + rh.y) / 2
-        var lines: [String] = []
-        var issues = Set<PoseIssueCode>()
+        let formIssues = issues
 
         // 中高齡：軀幹直立與平衡（肩→髖中線）
         if profile.isMiddleAgedPlus {
@@ -202,7 +204,11 @@ enum PoseGaitAdvisor {
             }
         }
 
-        if lines.isEmpty {
+        let onlyCoreOrPraise = issues == formIssues && (
+            lines == WalkingFormAdvisor.corePrincipleLines
+            || lines.contains(where: { $0.contains("對側擺臂") || $0.contains("腳跟先著地") })
+        )
+        if onlyCoreOrPraise {
             if profile.isMiddleAgedPlus {
                 lines.append("步態提示：步幅略小、擺臂減少在中高齡屬正常；重點是軀幹直立、重心穩定、避免拖步。")
             } else if profile.isHighBMI {
@@ -210,7 +216,7 @@ enum PoseGaitAdvisor {
             } else if profile.isTall {
                 lines.append("步態提示：高身高者請控制跨步，腳掌儘量落在骨盆正下方。")
             } else if profile.isYoungAdult {
-                lines.append("步態提示：青壯年可追求完整推蹬與髖伸展，維持軀幹穩定即可。")
+                lines.append("步態提示：青壯年可在腳尖蹬地時帶出髖伸展，維持軀幹穩定即可。")
             }
         }
 
@@ -228,8 +234,17 @@ struct GaitSessionMetrics {
     var limitedHipExtensionFrames: Int = 0
     var trunkInstabilityFrames: Int = 0
     var evaluatedFrames: Int = 0
+    var walkingFormFrames: Int = 0
+    var raisedArmFrames: Int = 0
+    var excessiveArmFrames: Int = 0
+    var ipsilateralArmFrames: Int = 0
+    var forefootStrikeFrames: Int = 0
+    var incompleteToeOffFrames: Int = 0
+    var goodArmSwingFrames: Int = 0
+    var goodFootRollFrames: Int = 0
 
     mutating func ingest(landmarks: QuickPose.Landmarks, profile: BodyGaitProfile?) {
+        WalkingFormAdvisor.accumulate(metrics: &self, snapshot: WalkingFormAdvisor.snapshot(from: landmarks))
         guard let profile else { return }
 
         func ok(_ p: QuickPose.Point3d) -> Bool {
