@@ -840,10 +840,11 @@ struct PoseDetectionView: View {
             Image(systemName: "line.3.horizontal.circle.fill")
                 .font(.title2)
                 .foregroundStyle(.white)
-                .padding(8)
-                .background(.black.opacity(0.45), in: Circle())
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("選單")
     }
 
     @MainActor
@@ -1358,7 +1359,7 @@ struct PoseDetectionView: View {
                 .overlay(alignment: .top) {
                     stepFlashOverlay(safeTop: geometry.safeAreaInsets.top)
                 }
-                .overlay(alignment: .topLeading) {
+                .overlay(alignment: .top) {
                     poseHUDOverlay(safeTop: geometry.safeAreaInsets.top)
                 }
                 .overlay(alignment: .bottom) {
@@ -1396,6 +1397,7 @@ struct PoseDetectionView: View {
                     flipHorizontally: skeletonFlipsHorizontally
                 )
                 .frame(width: w, height: h)
+                .allowsHitTesting(false)
             }
         }
         .id(cameraContentID)
@@ -1441,34 +1443,38 @@ struct PoseDetectionView: View {
         HStack(alignment: .top, spacing: 10) {
             poseStatusBadge
             Spacer(minLength: 8)
-            VStack(alignment: .trailing, spacing: 8) {
-                appMenuButton
-                Button {
-                    showPhotosPicker = true
-                } label: {
-                    Label("選影片", systemImage: "film.fill")
-                        .font(.caption.weight(.bold))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.purple)
-                .disabled(isLoadingVideo)
+            Button {
+                showPhotosPicker = true
+            } label: {
+                Label("選影片", systemImage: "film.fill")
+                    .font(.caption.weight(.bold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
             }
+            .buttonStyle(.borderedProminent)
+            .tint(.purple)
+            .disabled(isLoadingVideo)
         }
         .padding(.horizontal, 12)
-        .padding(.top, safeTop + 8)
+        // GeometryReader 在 ignoresSafeArea 下 safeTop 可能是 0；右上角又是控制中心熱區。
+        .padding(.top, max(safeTop, 54) + 6)
         .zIndex(2)
     }
 
     private var poseStatusBadge: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(assessmentEngine.hudBadgeTitle)
-                .font(.caption.weight(.bold))
-                .foregroundStyle(assessmentEngine == .mediaPipe ? .mint : .orange)
-            Text(modeStore.activity.coreTitle)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(modeStore.activity == .running ? .orange : .cyan)
+            HStack(alignment: .center, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(assessmentEngine.hudBadgeTitle)
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(assessmentEngine == .mediaPipe ? .mint : .orange)
+                    Text(modeStore.activity.coreTitle)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(modeStore.activity == .running ? .orange : .cyan)
+                }
+                Spacer(minLength: 4)
+                appMenuButton
+            }
             Text(quickPoseEngine.fpsText)
                 .font(.system(size: 16, weight: .semibold, design: .rounded))
                 .foregroundStyle(.white)
