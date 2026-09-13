@@ -3,7 +3,7 @@
 //  pose
 //
 //  以 Realm Database 建立姿勢偵測資料庫，將每一幀偵測到的「全部身體節點」
-//  連同座標寫入本機 Realm（pose.realm）。
+//  連同座標寫入本機。QuickPose／自訓模型寫入 pose.realm；MediaPipe 寫入 mediapipe.realm。
 //
 //  資料結構：
 //    RLMPoseSession  一次偵測（相機或影片）為一筆，含起訖時間、來源與最終步態統計。
@@ -96,20 +96,86 @@ struct PoseSessionRecord: Identifiable {
 
 // MARK: - Realm 資料庫
 
-final class PoseDatabase {
-    static let shared = PoseDatabase()
+/// 本機節點庫種類：QuickPose／自訓模型走 `pose.realm`，MediaPipe 走獨立的 `mediapipe.realm`。
+enum PoseNodeStoreKind: String {
+    case pose
+    case mediaPipe = "mediapipe"
 
-    private let queue = DispatchQueue(label: "ai.pose.database", qos: .utility)
+    var sheetTitle: String {
+        switch self {
+        case .pose: return "節點資料庫"
+        case .mediaPipe: return "MediaPipe 資料庫"
+        }
+    }
+
+    var buttonTitle: String {
+        switch self {
+        case .pose: return "姿勢節點資料庫"
+        case .mediaPipe: return "MediaPipe 資料庫"
+        }
+    }
+
+    var uploadPath: String {
+        switch self {
+        case .pose: return "/poses"
+        case .mediaPipe: return "/mediapipe/poses"
+        }
+    }
+
+    var emptyHint: String {
+        switch self {
+        case .pose:
+            return "開始相機或影片偵測後，節點會存入 pose.realm；完成後可在此標「好 / 壞」上傳訓練。"
+        case .mediaPipe:
+            return "MediaPipe 偵測的骨架會存入獨立的 mediapipe.realm，與 QuickPose／自訓模型資料分開。"
+        }
+    }
+}
+
+final class PoseDatabase {
+    /// QuickPose／自訓模型節點 + 與歷史摘要同一套 pose.realm。
+    static let shared = PoseDatabase(
+        kind: .pose,
+        queueLabel: "ai.pose.database",
+        fileURL: PoseRealm.fileURL,
+        open: PoseRealm.open,
+        migrate: { PoseRealm.migrateLegacyIfNeeded() }
+    )
+
+    /// MediaPipe 專用獨立 Realm（mediapipe.realm）。
+    static let mediaPipe = PoseDatabase(
+        kind: .mediaPipe,
+        queueLabel: "ai.pose.mediapipe.database",
+        fileURL: MediaPipeRealm.fileURL,
+        open: MediaPipeRealm.open
+    )
+
+    static func store(for engine: PoseAssessmentEngine) -> PoseDatabase {
+        engine == .mediaPipe ? .mediaPipe : .shared
+    }
+
+    let kind: PoseNodeStoreKind
+    let fileURL: URL
+
+    private let queue: DispatchQueue
+    private let openRealm: () throws -> Realm
 
     /// 目前進行中的 session（僅在 queue 上存取）。
     private var activeSessionID: String?
     private var frameCounter: Int = 0
 
-    let fileURL: URL
-
-    private init() {
-        self.fileURL = PoseRealm.fileURL
-        PoseRealm.migrateLegacyIfNeeded()
+    private init(
+        kind: PoseNodeStoreKind,
+        queueLabel: String,
+        fileURL: URL,
+        open: @escaping () throws -> Realm,
+        migrate: (() -> Void)? = nil
+    ) {
+        self.kind = kind
+        self.fileURL = fileURL
+        self.queue = DispatchQueue(label: queueLabel, qos: .utility)
+        self.openRealm = open
+        migrate?()
     }
 
     // MARK: Session 生命週期
@@ -118,8 +184,8 @@ final class PoseDatabase {
     func beginSession(sourceLabel: String) -> String {
         let id = UUID().uuidString
         let now = Date()
-        queue.async { [weak self] in
-            guard let self, let realm = try? PoseRealm.open() else { return }
+        queue.sync { [weak self] in
+            guard let self, let realm = try? self.openRealm() else { return }
             self.activeSessionID = id
             self.frameCounter = 0
             let session = RLMPoseSession()
@@ -137,7 +203,7 @@ final class PoseDatabase {
         guard !nodes.isEmpty else { return }
         let ts = timestamp.timeIntervalSince1970
         queue.async { [weak self] in
-            guard let self, let sid = self.activeSessionID, let realm = try? PoseRealm.open() else { return }
+            guard let self, let sid = self.activeSessionID, let realm = try? self.openRealm() else { return }
             let frame = self.frameCounter
             self.frameCounter += 1
 
@@ -165,8 +231,8 @@ final class PoseDatabase {
 
     func endSession(totalSteps: Int, leftSteps: Int, rightSteps: Int, avgCadenceBPM: Double?) {
         let now = Date()
-        queue.async { [weak self] in
-            guard let self, let sid = self.activeSessionID, let realm = try? PoseRealm.open() else { return }
+        queue.sync { [weak self] in
+            guard let self, let sid = self.activeSessionID, let realm = try? self.openRealm() else { return }
             try? realm.write {
                 if let session = realm.object(ofType: RLMPoseSession.self, forPrimaryKey: sid) {
                     session.endedAt = now
@@ -185,7 +251,7 @@ final class PoseDatabase {
 
     func sessions() -> [PoseSessionRecord] {
         queue.sync {
-            guard let realm = try? PoseRealm.open() else { return [] }
+            guard let realm = try? openRealm() else { return [] }
             return realm.objects(RLMPoseSession.self)
                 .sorted(byKeyPath: "startedAt", ascending: false)
                 .map { session in
@@ -210,7 +276,7 @@ final class PoseDatabase {
 
     func totalNodeCount() -> Int {
         queue.sync {
-            guard let realm = try? PoseRealm.open() else { return 0 }
+            guard let realm = try? openRealm() else { return 0 }
             return realm.objects(RLMPoseSession.self).reduce(0) { total, session in
                 total + session.frames.reduce(0) { $0 + $1.nodes.count }
             }
@@ -219,7 +285,7 @@ final class PoseDatabase {
 
     func firstFrameNodes(sessionID: String) -> [PoseNode] {
         queue.sync {
-            guard let realm = try? PoseRealm.open(),
+            guard let realm = try? openRealm(),
                   let session = realm.object(ofType: RLMPoseSession.self, forPrimaryKey: sessionID),
                   let first = session.frames.min(by: { $0.frameIndex < $1.frameIndex }) else { return [] }
             return first.nodes.map {
@@ -230,7 +296,7 @@ final class PoseDatabase {
 
     func allFrames(sessionID: String) -> [PoseFrameRecord] {
         queue.sync {
-            guard let realm = try? PoseRealm.open(),
+            guard let realm = try? openRealm(),
                   let session = realm.object(ofType: RLMPoseSession.self, forPrimaryKey: sessionID) else { return [] }
             return session.frames
                 .sorted(by: { $0.frameIndex < $1.frameIndex })
@@ -249,7 +315,7 @@ final class PoseDatabase {
     func markTrainingUpload(sessionID: String, label: String) {
         let now = Date()
         queue.sync {
-            guard let realm = try? PoseRealm.open() else { return }
+            guard let realm = try? openRealm() else { return }
             try? realm.write {
                 if let session = realm.object(ofType: RLMPoseSession.self, forPrimaryKey: sessionID) {
                     session.trainingLabel = label
@@ -261,7 +327,7 @@ final class PoseDatabase {
 
     func clearAll() {
         queue.sync {
-            guard let realm = try? PoseRealm.open() else { return }
+            guard let realm = try? openRealm() else { return }
             try? realm.write {
                 realm.delete(realm.objects(RLMPoseSession.self))
             }

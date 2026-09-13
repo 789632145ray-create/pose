@@ -7,7 +7,7 @@
 │                        Pose 姿勢偵測 APP 系統架構                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  ① 使用者端 APP          ② 資料蒐集          ③ 特徵擷取                      │
-│  (iOS / SwiftUI)        (QuickPose SDK)     (關節 / 步態 / 統計)            │
+│  (iOS / SwiftUI)        (QuickPose / MediaPipe)  (關節 / 步態 / 統計)       │
 │         │                      │                      │                     │
 │         └──────────────────────┼──────────────────────┘                     │
 │                                ▼                                            │
@@ -33,7 +33,7 @@ flowchart TB
     end
 
     subgraph M2["② 資料蒐集模組"]
-        QP[QuickPose SDK]
+        QP[QuickPose SDK / MediaPipe BlazePose Full]
         DB[(PoseDatabase / Realm)]
     end
 
@@ -94,10 +94,10 @@ flowchart TB
 | 根畫面／登入路由 | 未登入顯示 LoginView，登入後進入偵測 | `pose/RootView.swift` |
 | 帳號註冊／登入／登出 | Bearer Token 存 Keychain | `pose/AuthManager.swift`, `pose/LoginView.swift`, `pose/KeychainHelper.swift` |
 | 會員管理 | 修改密碼、個人資料 | `pose/MemberProfileSheet.swift` |
-| 引擎切換 | QuickPose SDK 模式 vs 訓練模型完整管線 | `pose/PoseDetectionShellView.swift` |
+| 引擎切換 | QuickPose / MediaPipe / 自訓模型皆走完整管線（相機、影片、節點庫、標好壞） | `pose/PoseDetectionShellView.swift`, `pose/PoseAssessmentEngine.swift` |
 | 即時相機偵測 | FPS、overlay、開始／暫停／倒數 | `pose/PoseDetectionView.swift` |
 | 影片上傳偵測 | PhotosPicker 選檔、逐幀分析 | `pose/PoseDetectionView.swift` |
-| 簡易 SDK 模式 | 僅 QuickPose overlay，不含完整管線 | `pose/QuickPoseBasicDetectionView.swift` |
+| 影片上傳 | 相簿 PhotosPicker 或「檔案」匯入 | `pose/PoseDetectionView.swift` |
 | 伺服器設定 | Debug 本機 / Release Railway HTTPS | `pose/ServerConfig.swift`, `pose/Info.plist` |
 
 **即時 UI 回饋：**
@@ -110,14 +110,15 @@ flowchart TB
 
 ## ② 資料蒐集模組
 
-**職責：** 以 QuickPose SDK 從相機或本機影片擷取骨架，每幀 35 個身體關節，寫入本機並可串流至雲端。
+**職責：** 以 QuickPose SDK（內建 MediaPipe BlazePose）從相機或本機影片擷取骨架，每幀 35 個身體關節，寫入本機並可串流至雲端。
 
 | 功能 | 說明 | 對應檔案 |
 |------|------|----------|
-| SDK 初始化與影格回呼 | `QuickPose.start(features: [.overlay(.wholeBody)])` | `pose/PoseDetectionView.swift` → `QuickPoseEngine` |
+| 引擎選擇 | QuickPose 原生 / MediaPipe Full / 自訓模型 | `pose/PoseAssessmentEngine.swift` |
+| SDK 初始化與影格回呼 | `QuickPose.start`；MediaPipe 使用 `modelComplexity: .good`（BlazePose Full）+ `.showPoints()` | `pose/PoseDetectionView.swift` → `QuickPoseEngine` |
 | 35 關節擷取 | nose、shoulder_mid、hip_mid + 左右各 16 點 | `pose/PoseDatabase.swift` → `PoseNodeExtractor` |
-| 本機持久化 | 每幀寫入 Realm（非阻塞背景佇列） | `pose/PoseDatabase.swift`, `pose/PoseRealm.swift` |
-| 即時串流上傳 | 逐批 POST 至 MongoDB | `pose/PoseStreamClient.swift` |
+| 本機持久化 | 每幀寫入 Realm（非阻塞背景佇列）；MediaPipe 用獨立 `mediapipe.realm` | `pose/PoseDatabase.swift`, `pose/PoseRealm.swift`, `pose/MediaPipeRealm.swift` |
+| 即時串流上傳 | 自訓模型模式逐批 POST 至 MongoDB | `pose/PoseStreamClient.swift` |
 
 **資料格式（單一節點）：**
 
@@ -132,7 +133,7 @@ struct PoseNode {
 **流程：**
 
 1. QuickPose 回傳 `Landmarks` → `PoseNodeExtractor.extractAll`
-2. `PoseDatabase.shared.recordFrame` 寫入本機 Realm
+2. `PoseDatabase.store(for:)` 寫入本機 Realm（MediaPipe → `mediapipe.realm`，其餘 → `pose.realm`）
 3. `PoseStreamClient.enqueue` 暫存待上傳幀（訓練模型模式）
 
 ---
@@ -180,7 +181,9 @@ Landmarks → 低通(5幀) → 骨盆中心歸一 → 左右腳踝 y 峰谷 → 
 | 預測邏輯 | `backend/main.py` → `@app.post("/predict")` |
 | 特徵工程（共用） | `backend/train.py` → `session_features` |
 | 模型健康檢查 | `GET /health/model` |
-| 引擎選擇 | `pose/PoseAssessmentEngine.swift`（`.trainedModel`） |
+| 引擎選擇 | `pose/PoseAssessmentEngine.swift`（`.quickPose` / `.mediaPipe` / `.trainedModel`） |
+
+MediaPipe 模式使用已連結的 `QuickPoseMP-full`（BlazePose Full，`modelComplexity: .good`），在裝置上做骨架與規則建議，**不呼叫** `/predict`。自訓模型模式同樣用 Full 骨架，再串流到後端 RandomForest。
 
 **回傳範例：**
 
@@ -302,9 +305,10 @@ flowchart LR
 
 | 儲存 | 技術 | 內容 | 位置 |
 |------|------|------|------|
-| iOS 本機 | **Realm** (`pose.realm`) | 姿勢節點 session、分析摘要 | `pose/PoseRealm.swift` |
+| iOS 本機 | **Realm** (`pose.realm`) | QuickPose／自訓模型節點、分析摘要 | `pose/PoseRealm.swift` |
+| iOS 本機 | **Realm** (`mediapipe.realm`) | MediaPipe BlazePose 節點 session | `pose/MediaPipeRealm.swift` |
 | iOS 本機（舊版） | SQLite / JSON | 首次啟動自動遷移至 Realm | `PoseRealm.migrateLegacyIfNeeded` |
-| 雲端 | **MongoDB Atlas** | `users`（帳號）、`pose_sessions`（節點+標籤） | `backend/main.py` |
+| 雲端 | **MongoDB Atlas** | `users`、`pose_sessions`、`mediapipe_sessions` | `backend/main.py` |
 | 雲端模型 | Railway Volume / 映像內 | `pose_quality_model.joblib` | `backend/` |
 
 > 架構圖中的「本機 SQLite app.db」與「Railway SQLite 帳號庫」在現版已改為 **MongoDB Atlas 統一管理帳號與姿勢資料**；本機以 **Realm** 取代 SQLite 存節點與摘要。
@@ -336,9 +340,9 @@ RootView (登入)
 | 模組 | iOS (`pose/`) | 後端 (`backend/`) |
 |------|---------------|-------------------|
 | ① 使用者端 APP | `RootView`, `LoginView`, `PoseDetectionView`, `AuthManager` | — |
-| ② 資料蒐集 | `PoseDatabase`, `PoseNodeExtractor`, `QuickPoseEngine` | — |
+| ② 資料蒐集 | `PoseDatabase`, `MediaPipeRealm`, `PoseNodeExtractor`, `QuickPoseEngine` | `mediapipe_sessions` |
 | ③ 特徵擷取 | `PoseAnalysisPipeline`, `PoseAdvice` | `train.py` (session_features) |
-| ④ AI 辨識 | `PoseStreamClient`, `PoseAssessmentEngine` | `main.py` (/predict), `*.joblib` |
+| ④ AI 辨識 | `PoseStreamClient`, `PoseAssessmentEngine`（QuickPose / MediaPipe / 自訓模型） | `main.py` (/predict), `*.joblib` |
 | ⑤ 健康評估 | `PoseAnalysisPipeline`, `LivePrediction` | — |
 | ⑥ 建議產生 | `PauseAdvice`, `SummaryStore`, summary sheet | — |
 | ⑦ 雲端後端 | `ServerConfig`, `AuthManager`, `PoseStreamClient` | `main.py`, `Dockerfile` |

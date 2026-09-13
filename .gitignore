@@ -21,12 +21,26 @@ Packages/
 Package.pins
 Package.resolved
 
-# 後端獨立 repo（已推至 runpose-backend），勿嵌進 iOS repo
-backend/
+# 後端 Python 本機產物（原始碼已納入 backend/）
+backend/.venv/
+backend/__pycache__/
+backend/*.pyc
+backend/dataset.csv
+backend/server.log
+backend/server_test.log
+backend/app.db
+backend/app.db-journal
+backend/app.db-wal
+backend/app.db-shm
 
 # Cursor / 本地工具
 .cursor/
 *.log
+
+# 本機 Realm（pose.realm / mediapipe.realm 在裝置上產生）
+*.realm
+*.realm.lock
+*.realm.management/
 
 # 敏感設定（若將來有本地 override）
 *.local.plist

@@ -237,6 +237,7 @@ final class PoseStreamClient {
         let left_steps: Int
         let right_steps: Int
         let avg_cadence_bpm: Double?
+        let engine: String
         let frames: [WireFrame]
     }
 
@@ -260,7 +261,8 @@ final class PoseStreamClient {
         rightSteps: Int,
         avgCadenceBPM: Double?,
         frames: [PoseFrameRecord],
-        maxFrames: Int = 600
+        maxFrames: Int = 240,
+        path: String = "/poses"
     ) async -> LabeledUploadResult {
         guard let token = KeychainHelper.read(Self.tokenAccount), !token.isEmpty else {
             return LabeledUploadResult(success: false, message: "尚未登入")
@@ -283,32 +285,68 @@ final class PoseStreamClient {
             )
         }
 
+        let engine = path.contains("mediapipe") ? "mediapipe" : "pose"
         let body = PoseUploadBody(
             label: label,
-            source_label: sourceLabel,
+            source_label: engine == "mediapipe" && !sourceLabel.hasPrefix("mediapipe")
+                ? "mediapipe｜\(sourceLabel)"
+                : sourceLabel,
             total_steps: totalSteps,
             left_steps: leftSteps,
             right_steps: rightSteps,
             avg_cadence_bpm: avgCadenceBPM,
+            engine: engine,
             frames: wire
         )
 
-        do {
-            let (data, http) = try await postRaw(path: "/poses", body: body, timeout: 120)
-            guard (200...299).contains(http.statusCode) else {
-                let detail = (try? JSONDecoder().decode(APIErrorBody.self, from: data))?.detail
-                return LabeledUploadResult(success: false, message: detail ?? "上傳失敗（\(http.statusCode)）")
-            }
-            if let resp = try? JSONDecoder().decode(PoseUploadResponse.self, from: data) {
-                return LabeledUploadResult(
-                    success: true,
-                    message: "已上傳 \(resp.frame_count) 幀、\(resp.node_count) 節點"
+        // 正式 Railway 目前只有 /poses；/mediapipe/poses 會 404 或連線失敗，必須改傳到 /poses。
+        let pathsToTry = path == "/poses" ? ["/poses"] : [path, "/poses"]
+        var lastFailure = "上傳失敗"
+        for tryPath in pathsToTry {
+            do {
+                let (data, http) = try await postRaw(path: tryPath, body: body, timeout: 120)
+                if http.statusCode == 404 {
+                    lastFailure = "雲端尚無 \(tryPath)"
+                    continue
+                }
+                let decoded = Self.decodeLabeledUpload(
+                    data: data,
+                    http: http,
+                    extraSuccessNote: tryPath == "/poses" && path != "/poses"
+                        ? "已存到現有 pose_sessions，不必新建 Railway"
+                        : nil
                 )
+                if decoded.success || http.statusCode == 401 {
+                    return decoded
+                }
+                lastFailure = decoded.message
+            } catch {
+                lastFailure = "無法連線 \(baseURL)\(tryPath)：\(error.localizedDescription)"
             }
-            return LabeledUploadResult(success: true, message: "已上傳至雲端")
-        } catch {
-            return LabeledUploadResult(success: false, message: "無法連線：\(error.localizedDescription)")
         }
+        return LabeledUploadResult(success: false, message: lastFailure)
+    }
+
+    private static func decodeLabeledUpload(
+        data: Data,
+        http: HTTPURLResponse,
+        extraSuccessNote: String? = nil
+    ) -> LabeledUploadResult {
+        if http.statusCode == 401 {
+            return LabeledUploadResult(success: false, message: "登入已過期，請重新登入")
+        }
+        guard (200...299).contains(http.statusCode) else {
+            let detail = (try? JSONDecoder().decode(APIErrorBody.self, from: data))?.detail
+            return LabeledUploadResult(success: false, message: detail ?? "上傳失敗（\(http.statusCode)）")
+        }
+        if let resp = try? JSONDecoder().decode(PoseUploadResponse.self, from: data) {
+            var message = "已上傳 \(resp.frame_count) 幀、\(resp.node_count) 節點"
+            if let extraSuccessNote {
+                message += "（\(extraSuccessNote)）"
+            }
+            return LabeledUploadResult(success: true, message: message)
+        }
+        return LabeledUploadResult(success: true, message: extraSuccessNote ?? "已上傳至雲端")
     }
 
     // MARK: 私有
