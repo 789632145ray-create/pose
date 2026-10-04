@@ -143,5 +143,8 @@ A: 已登入者可做本機偵測與看 Realm 歷史；登入、上傳、AI 辨�
 **Q: Railway Projects 裡面沒有東西？**  
 A: 多半是登錯帳號或左上角 workspace 不對。舊網址若還能開，服務還在，只是這個帳號看不到。看不到就依上面「第二步」用 `pose` repo 新建，Variables 接回同一個 Atlas。
 
+**Q: 要把 iOS App 放進 runpose-backend 嗎？**  
+A: 不要。App 與 Xcode 專案只留在這個 `pose` repo。Railway 只部署 `backend/`（或根目錄 `Dockerfile`），不會跑 iOS。
+
 **Q: Build 失敗「Failed to build an image」？**  
-A: 選 `pose` repo 時 Root Directory **留空**（用根目錄 `Dockerfile`）。若改連舊的 `runpose-backend` 且 `main.py` 在根目錄，Root Directory 也是留空。
+A: 選 `pose` repo 時 Root Directory **留空**（用根目錄 `Dockerfile`）。
