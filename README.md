@@ -1,5 +1,13 @@
 # pose
 
-iOS App 與後端已搬回 **[runpose-backend](https://github.com/789632145ray-create/runpose-backend)**。
+iOS App（`pose.xcodeproj`）+ FastAPI 後端（`backend/`）。
 
-請到那個 repo 開 `pose.xcodeproj`、跑 `train.py`、部署 Railway。這個 `pose` repo 不再作為主開發位置。
+Railway 專案列表是空的時，用這個 repo 重建即可：**New Project → GitHub → `pose`**，Root Directory 留空。步驟見 [backend/DEPLOY.md](./backend/DEPLOY.md)。
+
+本機訓練：
+
+```bash
+cd backend
+source .venv/bin/activate
+python train.py --engine mediapipe --from-json mediapipe_training_export.json
+```

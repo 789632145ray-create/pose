@@ -34,38 +34,38 @@ iPhone 本機 Realm Database（純本機、不同步雲端）
 
 ## 第二步：部署到 Railway（建議）
 
-Railway **只跑後端 API**，不會出現 iOS App（App 用 Xcode 裝在手機）。  
-現在正式站連的是舊的 `runpose-backend`（沒有 MediaPipe、`/dataset/export`）。請改連這個 `pose` repo 的 `backend/`。
+Railway **只跑後端 API**，專案列表不會出現 iOS App（App 用 Xcode 裝在手機）。
 
-### 已有 Railway 專案（改連線來源）
+### Railway Projects 是空的？
 
-1. 打開 [Railway](https://railway.app) → 你的服務（`runpose-backend-production`）
-2. **Settings → Source**
-3. Repo 改成 **`789632145ray-create/pose`**
-4. Branch 先選 **`cursor/add-runpose-backend-dd14`**（合併進 `main` 後再改 `main`）
-5. **Root Directory** 填 **`backend`**（這裡才有 `main.py` / `Dockerfile`）
-6. **Variables 不要清掉**（`POSE_MONGO_URL`、`POSE_SECRET_KEY` 留著）
-7. **Deploy** 等綠燈後打開：
-   - `https://你的網址/health/mongo`
-   - `https://你的網址/health/model/mediapipe`（新後端才會有；還沒訓練模型時可能顯示尚未訓練）
+先確認這兩件事：
 
-1. 到 [Railway](https://railway.app) 用 GitHub 登入
-2. **New Project** → **Deploy from GitHub repo** → 選 **`pose`**（或舊的 `runpose-backend`）
-3. **Root Directory**：連 `pose` 時填 **`backend`**；連 `runpose-backend` 且 `main.py` 在根目錄時 **留空**
-4. **Variables** 新增：
+1. **舊服務可能還在跑。** App 現在連的 `https://runpose-backend-production.up.railway.app` 若 `/` 回 `{"status":"ok"}`，代表雲端沒掛，只是你這個 Railway 帳號／工作區看不到它。
+2. 打開 [Railway dashboard](https://railway.app/dashboard) 左上角 **workspace**，切換個人帳號與任何 Team。登錯 GitHub / Google 帳號時，列表會是空的。
+
+看不到舊專案就重建一個（資料在 MongoDB Atlas，不在 Railway）：
+
+1. 到 [Railway](https://railway.app) 用 **同一個 GitHub** 登入
+2. **New Project** → **Deploy from GitHub repo** → 選 **`789632145ray-create/pose`**
+3. 若沒看到 repo：Account Settings → GitHub → 勾選 `pose`
+4. Branch 選 **`cursor/add-runpose-backend-dd14`**（合併進 `main` 後再改 `main`）
+5. **Root Directory 留空**（根目錄 `Dockerfile` 會去抓 `backend/`）
+6. **Variables** 新增：
 
    | 變數 | 值 |
    |------|-----|
-   | `POSE_SECRET_KEY` | 隨機長字串（`openssl rand -hex 32`） |
-   | `POSE_MONGO_URL` | Atlas 連線字串 |
+   | `POSE_SECRET_KEY` | 隨機長字串（`openssl rand -hex 32`）。換了金鑰後手機要重新登入 |
+   | `POSE_MONGO_URL` | Atlas **完整**連線字串（到 Atlas → Connect 複製，不要用 `mongodb+srv://...`） |
    | `POSE_MONGO_DB` | `pose` |
    | `POSE_RELOAD` | `0` |
 
-5. **Networking** → **Generate Domain**
-6. 部署完成後：
-   - `GET /` → `{"status":"ok","service":"pose-auth"}`
-   - `GET /health/auth` → `{"status":"ok","storage":"mongodb_atlas",...}`
-   - `GET /health/mongo` → MongoDB 連線正常
+7. 服務開好後：**Settings → Networking → Generate Domain**
+8. 瀏覽器打開：
+   - `https://你的新網址.up.railway.app/` → `{"status":"ok","service":"pose-auth"}`
+   - `https://你的新網址.up.railway.app/health/mongo` → Mongo 正常
+9. 把新網址填進 `pose/Info.plist` 的 `PoseServerBaseURL`，重新編譯 App
+
+用**同一個 Atlas 連線**，原本的帳號與標籤資料還在。換了新資料庫就會變空，要重新註冊、重新標。
 
 ### 上傳訓練模型（品質辨識）
 
@@ -140,5 +140,8 @@ A: 重新登入；確認 Railway 已設定 `POSE_SECRET_KEY` 且 `POSE_MONGO_URL
 **Q: 沒網路能用嗎？**  
 A: 已登入者可做本機偵測與看 Realm 歷史；登入、上傳、AI 辨識需要網路。
 
+**Q: Railway Projects 裡面沒有東西？**  
+A: 多半是登錯帳號或左上角 workspace 不對。舊網址若還能開，服務還在，只是這個帳號看不到。看不到就依上面「第二步」用 `pose` repo 新建，Variables 接回同一個 Atlas。
+
 **Q: Build 失敗「Failed to build an image」？**  
-A: Root Directory 設錯。選 `runpose-backend` repo 時 Root Directory **留空**。
+A: 選 `pose` repo 時 Root Directory **留空**（用根目錄 `Dockerfile`）。若改連舊的 `runpose-backend` 且 `main.py` 在根目錄，Root Directory 也是留空。
