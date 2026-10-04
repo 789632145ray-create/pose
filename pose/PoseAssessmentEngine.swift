@@ -70,9 +70,22 @@ enum PoseAssessmentEngine: String, CaseIterable, Identifiable, Codable {
         self != .trainedModel
     }
 
-    /// 需要串流節點到後端並呼叫 /predict。
+    /// 需要串流節點到後端並呼叫 /predict（自訓模型）。
     var usesTrainedModelPredict: Bool {
         self == .trainedModel
+    }
+
+    /// 用雲端模型做品質辨識：自訓模型走 /predict，MediaPipe 走 /mediapipe/predict。
+    var usesQualityPredict: Bool {
+        self == .trainedModel || self == .mediaPipe
+    }
+
+    var predictPath: String {
+        self == .mediaPipe ? "/mediapipe/predict" : "/predict"
+    }
+
+    var predictEngineName: String {
+        self == .mediaPipe ? "mediapipe" : "pose"
     }
 
     /// 三種引擎共用同一個已啟動的 QuickPose Full 工作階段畫骨架線。

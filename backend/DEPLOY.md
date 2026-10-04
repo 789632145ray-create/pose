@@ -57,10 +57,11 @@ iPhone 本機 Realm Database（純本機、不同步雲端）
 ```bash
 cd backend
 source .venv/bin/activate
-python train.py   # 產生 pose_quality_model.joblib
+python train.py                      # pose_quality_model.joblib
+python train.py --engine mediapipe   # mediapipe_quality_model.joblib
 ```
 
-把 `pose_quality_model.joblib` commit 進 repo 或上傳到 Railway 容器 `/app/`，然後重啟服務。
+把對應的 `.joblib` commit 進 repo 或上傳到 Railway 容器 `/app/`，然後重啟服務。
 
 ## 第三步：設定 iOS App
 

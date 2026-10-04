@@ -109,13 +109,16 @@ App 端在「節點資料庫」畫面選好「好 / 壞」標籤並上傳幾筆�
 ```bash
 cd backend
 source .venv/bin/activate
-python train.py            # 訓練 + 評估 + 存模型 pose_quality_model.joblib
-python train.py --export   # 另外匯出 dataset.csv（特徵 + 標籤）
+python train.py                         # QuickPose／自訓模型 → pose_quality_model.joblib
+python train.py --engine mediapipe      # MediaPipe 蒐集資料 → mediapipe_quality_model.joblib
+python train.py --engine mediapipe --export
 ```
 
+- MediaPipe 會讀 `mediapipe_sessions`，以及回退寫進 `pose_sessions` 且 `engine=mediapipe` 的資料。
 - 特徵：每個 session 的 35 個關節在所有影格的 (x,y,z) 平均與標準差（共 210 維）。
 - 模型：RandomForest 二元分類（good / bad）。
 - 樣本太少或只有單一標籤時會提示先補資料（建議好、壞各至少數筆）。
+- 訓練後重啟後端；App 的 MediaPipe 引擎會呼叫 `POST /mediapipe/predict`。
 
 ## 6. 正式環境注意
 

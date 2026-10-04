@@ -20,8 +20,12 @@ final class poseTests: XCTestCase {
         XCTAssertTrue(PoseAssessmentEngine.mediaPipe.usesFullDetectionPipeline)
         XCTAssertTrue(PoseAssessmentEngine.mediaPipe.usesRuleBasedAdvice)
         XCTAssertFalse(PoseAssessmentEngine.mediaPipe.usesTrainedModelPredict)
+        XCTAssertTrue(PoseAssessmentEngine.mediaPipe.usesQualityPredict)
+        XCTAssertEqual(PoseAssessmentEngine.mediaPipe.predictPath, "/mediapipe/predict")
+        XCTAssertEqual(PoseAssessmentEngine.mediaPipe.predictEngineName, "mediapipe")
 
         XCTAssertTrue(PoseAssessmentEngine.trainedModel.usesTrainedModelPredict)
+        XCTAssertTrue(PoseAssessmentEngine.trainedModel.usesQualityPredict)
         XCTAssertFalse(PoseAssessmentEngine.trainedModel.usesRuleBasedAdvice)
 
         XCTAssertTrue(PoseAssessmentEngine.quickPose.usesFullDetectionPipeline)

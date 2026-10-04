@@ -175,7 +175,7 @@ final class QuickPoseEngine: ObservableObject {
                     lines: advice.lines,
                     issues: advice.issues
                 )
-                if assessmentEngine.usesTrainedModelPredict {
+                if assessmentEngine.usesQualityPredict {
                     onStreamEnqueue?(nodes, ts)
                 }
                 adviceLines = result.lines
@@ -428,7 +428,7 @@ struct PoseDetectionView: View {
                     lines: summaryLines,
                     qualityResult: videoQualityResult,
                     isAnalyzingQuality: isAnalyzingVideoQuality,
-                    showsModelQuality: assessmentEngine.usesTrainedModelPredict,
+                    showsModelQuality: assessmentEngine.usesQualityPredict,
                     autoSaved: historySavedForSession,
                     onShowHistory: {
                         showSummary = false
@@ -805,8 +805,8 @@ struct PoseDetectionView: View {
                     HStack {
                         if isAnalyzingVideoQuality { ProgressView().tint(.white) }
                         Label(
-                            assessmentEngine.usesTrainedModelPredict ? "品質辨識與摘要" : "分析摘要",
-                            systemImage: assessmentEngine.usesTrainedModelPredict ? "brain.head.profile" : "text.alignleft"
+                            assessmentEngine.usesQualityPredict ? "品質辨識與摘要" : "分析摘要",
+                            systemImage: assessmentEngine.usesQualityPredict ? "brain.head.profile" : "text.alignleft"
                         )
                             .font(.subheadline.weight(.semibold))
                     }
@@ -1079,7 +1079,7 @@ struct PoseDetectionView: View {
     @MainActor
     private func buildSummaryLinesForHistory() -> [String] {
         var lines = analysisPipeline.videoSummary()
-        if assessmentEngine.usesTrainedModelPredict,
+        if assessmentEngine.usesQualityPredict,
            let pred = videoQualityResult ?? livePrediction,
            pred.note == nil,
            let label = pred.label {
@@ -1135,20 +1135,29 @@ struct PoseDetectionView: View {
     @MainActor
     private func startStreaming() {
         livePrediction = nil
-        guard assessmentEngine.usesTrainedModelPredict else { return }
+        guard assessmentEngine.usesQualityPredict else { return }
         let source = currentSourceLabel
+        let uploadLiveFrames = assessmentEngine.usesTrainedModelPredict
+        stream.predictPath = assessmentEngine.predictPath
+        stream.predictEngine = assessmentEngine.predictEngineName
         streamLoopTask?.cancel()
         streamLoopTask = Task {
-            let ok = await stream.begin(mode: .predict, sourceLabel: source)
-            guard ok else {
-                await MainActor.run { livePrediction = LivePrediction(label: nil, probabilityGood: 0, note: "未連線/未登入") }
-                return
+            if uploadLiveFrames {
+                let ok = await stream.begin(mode: .predict, sourceLabel: source)
+                guard ok else {
+                    await MainActor.run { livePrediction = LivePrediction(label: nil, probabilityGood: 0, note: "未連線/未登入") }
+                    return
+                }
+            } else {
+                stream.preparePredictWindow()
             }
             var tick = 0
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 if Task.isCancelled { break }
-                await stream.flush()
+                if uploadLiveFrames {
+                    await stream.flush()
+                }
                 tick += 1
                 if tick % 2 == 0 { // 約每秒預測一次
                     if let pred = await stream.predictIfReady() {
@@ -1265,13 +1274,15 @@ struct PoseDetectionView: View {
         videoQualityResult = nil
         showSummary = true
 
-        guard assessmentEngine.usesTrainedModelPredict else {
+        guard assessmentEngine.usesQualityPredict else {
             isAnalyzingVideoQuality = false
             autoSaveSummaryToHistory()
             return
         }
 
         isAnalyzingVideoQuality = true
+        stream.predictPath = assessmentEngine.predictPath
+        stream.predictEngine = assessmentEngine.predictEngineName
 
         let sessionID = dbSessionID
         Task {
@@ -1517,10 +1528,10 @@ struct PoseDetectionView: View {
             Text(assessmentEngine == .mediaPipe ? "MediaPipe 影片偵測中" : "影片偵測中")
                 .font(.caption2.weight(.bold))
                 .foregroundStyle(.purple)
-            if assessmentEngine.usesTrainedModelPredict, let result = videoQualityResult ?? livePrediction {
+            if assessmentEngine.usesQualityPredict, let result = videoQualityResult ?? livePrediction {
                 videoQualityBadge(result, compact: true)
             }
-        } else if assessmentEngine.usesTrainedModelPredict, let pred = livePrediction {
+        } else if assessmentEngine.usesQualityPredict, let pred = livePrediction {
             videoQualityBadge(pred, compact: true)
         }
     }
@@ -2081,7 +2092,7 @@ private struct PoseSessionDetailView: View {
                 Text("此次偵測")
             } footer: {
                 Text(database.kind == .mediaPipe
-                     ? "MediaPipe 節點存在本機 mediapipe.realm。標好／壞會傳到現有 Railway 的 /poses，不必新建專案。"
+                     ? "MediaPipe 節點存在本機 mediapipe.realm。標好／壞上傳後，用 python train.py --engine mediapipe 訓練獨立模型。"
                      : "在此標記好 / 壞並上傳至雲端，即可用 train.py 訓練模型。")
             }
 

@@ -219,9 +219,21 @@ def health_auth() -> dict:
 @app.get("/health/model")
 def health_model() -> dict:
     try:
-        bundle = get_model()
+        bundle = get_model("pose")
         classes = [int(c) for c in bundle["model"].classes_]
         return {"status": "ok", "model": "pose_quality_model.joblib", "classes": classes}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+@app.get("/health/model/mediapipe")
+def health_mediapipe_model() -> dict:
+    try:
+        bundle = get_model("mediapipe")
+        classes = [int(c) for c in bundle["model"].classes_]
+        return {"status": "ok", "model": "mediapipe_quality_model.joblib", "classes": classes}
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -590,27 +602,35 @@ def finish_session(session_id: str, payload: FinishIn, username: str = Depends(c
 # 即時預測：載入訓練好的模型，回傳「好 / 壞」
 # ---------------------------------------------------------------------------
 
-_model_cache: Optional[dict] = None
+_model_cache: dict[str, dict] = {}
 
 
-def get_model() -> dict:
-    global _model_cache
-    if _model_cache is None:
-        import joblib  # 延遲載入，避免無模型時也要求 sklearn 環境
+def get_model(engine: str = "pose") -> dict:
+    key = "mediapipe" if engine == "mediapipe" else "pose"
+    cached = _model_cache.get(key)
+    if cached is not None:
+        return cached
 
-        from train import MODEL_PATH
+    import joblib  # 延遲載入，避免無模型時也要求 sklearn 環境
 
-        if not os.path.exists(MODEL_PATH):
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="尚未訓練模型，請先用 train.py 訓練並產生 pose_quality_model.joblib",
-            )
-        _model_cache = joblib.load(MODEL_PATH)
-    return _model_cache
+    from train import MEDIAPIPE_MODEL_PATH, MODEL_PATH
+
+    path = MEDIAPIPE_MODEL_PATH if key == "mediapipe" else MODEL_PATH
+    if not os.path.exists(path):
+        hint = (
+            "尚未訓練 MediaPipe 模型，請先用 App 標好／壞上傳後執行：python train.py --engine mediapipe"
+            if key == "mediapipe"
+            else "尚未訓練模型，請先用 train.py 訓練並產生 pose_quality_model.joblib"
+        )
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=hint)
+    bundle = joblib.load(path)
+    _model_cache[key] = bundle
+    return bundle
 
 
 class PredictIn(BaseModel):
     frames: List[PoseFrame]
+    engine: Optional[str] = None
 
 
 class PredictResponse(BaseModel):
@@ -619,13 +639,12 @@ class PredictResponse(BaseModel):
     probability_bad: float
 
 
-@app.post("/predict", response_model=PredictResponse)
-def predict(payload: PredictIn, username: str = Depends(current_user)) -> PredictResponse:
+def _predict_with_engine(payload: PredictIn, engine: str) -> PredictResponse:
     import numpy as np
 
     from train import session_features
 
-    bundle = get_model()
+    bundle = get_model(engine)
     model = bundle["model"]
 
     feats = session_features({"frames": [f.model_dump() for f in payload.frames]})
@@ -641,6 +660,19 @@ def predict(payload: PredictIn, username: str = Depends(current_user)) -> Predic
         probability_good=p_good,
         probability_bad=p_bad,
     )
+
+
+@app.post("/predict", response_model=PredictResponse)
+def predict(payload: PredictIn, username: str = Depends(current_user)) -> PredictResponse:
+    engine = (payload.engine or "pose").strip().lower()
+    if engine not in {"pose", "mediapipe"}:
+        engine = "pose"
+    return _predict_with_engine(payload, engine)
+
+
+@app.post("/mediapipe/predict", response_model=PredictResponse)
+def predict_mediapipe(payload: PredictIn, username: str = Depends(current_user)) -> PredictResponse:
+    return _predict_with_engine(payload, "mediapipe")
 
 
 if __name__ == "__main__":

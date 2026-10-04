@@ -68,6 +68,9 @@ final class PoseStreamClient {
 
     private let batchMaxPending = 600        // 離線時上限，避免無限增長
     private let windowSize = 30
+    /// MediaPipe 走 /mediapipe/predict；舊雲端沒有該路徑時再回退 /predict。
+    var predictPath = "/predict"
+    var predictEngine = "pose"
 
     // MARK: Wire 模型（對應後端 PoseFrame / PoseNode）
 
@@ -93,6 +96,7 @@ final class PoseStreamClient {
 
     private struct FramesBody: Encodable {
         let frames: [WireFrame]
+        var engine: String? = nil
     }
 
     private struct FinishBody: Encodable {
@@ -113,6 +117,12 @@ final class PoseStreamClient {
     }
 
     var isStreaming: Bool { sessionID != nil }
+
+    /// 只準備本機預測視窗，不上傳到 /sessions（MediaPipe 訓練資料改由標好／壞上傳）。
+    func preparePredictWindow() {
+        reset()
+        _ = loadCredentials()
+    }
 
     // MARK: 生命週期
 
@@ -177,10 +187,23 @@ final class PoseStreamClient {
         guard loadCredentials() else {
             return LivePrediction(label: nil, probabilityGood: 0, note: "尚未登入")
         }
-        let body = FramesBody(frames: frames)
+        let body = FramesBody(frames: frames, engine: predictEngine)
         let timeout: TimeInterval = frames.count > 100 ? 90 : 30
+        let pathsToTry = predictPath == "/predict" ? ["/predict"] : [predictPath, "/predict"]
         do {
-            let (data, http) = try await postRaw(path: "/predict", body: body, timeout: timeout)
+            var lastData = Data()
+            var lastHTTP: HTTPURLResponse?
+            for path in pathsToTry {
+                let (data, http) = try await postRaw(path: path, body: body, timeout: timeout)
+                lastData = data
+                lastHTTP = http
+                if http.statusCode == 404 { continue }
+                break
+            }
+            guard let http = lastHTTP else {
+                return LivePrediction(label: nil, probabilityGood: 0, note: "無法連線伺服器")
+            }
+            let data = lastData
             if http.statusCode == 503 {
                 return LivePrediction(label: nil, probabilityGood: 0, note: "尚未訓練模型")
             }
