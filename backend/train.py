@@ -16,8 +16,10 @@
 
   # 手機上傳到 Railway／Atlas，本機 train.py 預設連 localhost（通常是空的）。
   # 請用和 Railway 相同的 Atlas 連線，或從雲端 API 拉你帳號標好的資料：
-  export POSE_MONGO_URL="mongodb+srv://..."
+  # 從 Railway Variables 複製完整 POSE_MONGO_URL，不要用 mongodb+srv://...
+  export POSE_MONGO_URL="mongodb+srv://使用者:密碼@cluster0.xxxx.mongodb.net/"
   python train.py --engine mediapipe
+  python train.py --engine mediapipe --from-json mediapipe_export.json
   python train.py --engine mediapipe --from-api https://runpose-backend-production.up.railway.app --username 帳號
 """
 
@@ -32,7 +34,8 @@ import urllib.request
 
 import joblib
 import numpy as np
-from mongo_util import make_mongo_client
+from mongo_util import describe_mongo_url_problem, make_mongo_client, mongo_url_help
+from pymongo.errors import ConfigurationError
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.model_selection import train_test_split
@@ -134,12 +137,42 @@ def rows_from_docs(docs: list[dict]) -> tuple[np.ndarray, np.ndarray]:
 
 
 def load_dataset(engine: str = "pose") -> tuple[np.ndarray, np.ndarray]:
-    client = make_mongo_client(MONGO_URL)
+    problem = describe_mongo_url_problem(MONGO_URL)
+    if problem:
+        raise RuntimeError(mongo_url_help(MONGO_URL))
+    try:
+        client = make_mongo_client(MONGO_URL)
+    except ConfigurationError as exc:
+        raise RuntimeError(mongo_url_help(MONGO_URL, exc)) from exc
     try:
         db = client[MONGO_DB_NAME]
         return rows_from_docs(collect_training_docs(db, engine))
     finally:
         client.close()
+
+
+def load_docs_from_json(path: str) -> list[dict]:
+    with open(path, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        sessions = payload.get("sessions")
+        if isinstance(sessions, list):
+            return sessions
+    raise RuntimeError("JSON 格式不正確：需要 {\"sessions\": [...]} 或 session 陣列")
+
+
+def load_dataset_from_json(path: str, engine: str) -> tuple[np.ndarray, np.ndarray]:
+    docs = load_docs_from_json(path)
+    if engine == "mediapipe":
+        docs = [doc for doc in docs if is_mediapipe_training_doc(doc) or str(doc.get("engine") or "") == "mediapipe"]
+        if not docs:
+            docs = load_docs_from_json(path)
+    elif engine == "pose":
+        docs = [doc for doc in docs if not is_mediapipe_training_doc(doc)]
+    print(f"從 JSON 讀取：{path}（{len(docs)} 筆 session）")
+    return rows_from_docs(docs)
 
 
 def _http_json(method: str, url: str, *, body: dict | None = None, headers: dict | None = None) -> dict:
@@ -204,16 +237,15 @@ def empty_dataset_hint(engine: str, mongo_url: str, from_api: bool) -> str:
             "",
             "若 --from-api 仍是 0 筆：請確認 App 詳情頁有出現「上傳成功」，",
             "且登入的是同一個帳號；雲端需已部署含 /dataset/export 的後端。",
+            "也可以在 App 資料庫按「匯出訓練 JSON」，再：",
+            f"  python train.py --engine {engine} --from-json 檔案.json",
         ]
     elif "localhost" in mongo_url or "127.0.0.1" in mongo_url:
         lines += [
             "",
-            "你現在連的是本機空庫。請改連 Atlas，或從雲端 API 拉資料：",
-            "  export POSE_MONGO_URL=\"mongodb+srv://（Railway 變數同款連線字串）\"",
-            f"  python train.py --engine {engine}",
-            "",
-            "或（部署新後端後）：",
-            f"  python train.py --engine {engine} --from-api https://runpose-backend-production.up.railway.app --username 帳號",
+            "你現在連的是本機空庫。不要複製文件裡的 mongodb+srv://...",
+            "請到 Railway → Variables 複製完整 POSE_MONGO_URL，或從手機匯出 JSON：",
+            f"  python train.py --engine {engine} --from-json 檔案.json",
         ]
     else:
         lines += [
@@ -250,6 +282,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--username", help="--from-api 登入帳號（也可用環境變數 POSE_API_USERNAME）")
     parser.add_argument("--password", help="--from-api 登入密碼（也可用環境變數 POSE_API_PASSWORD）")
+    parser.add_argument("--from-json", metavar="FILE", help="改從 App 匯出的訓練 JSON 讀資料（不連 Mongo）")
     return parser.parse_args(argv)
 
 
@@ -267,7 +300,14 @@ def main(argv: list[str] | None = None) -> int:
     out_model = model_output_path(engine)
     out_csv = csv_output_path(engine)
 
-    if args.from_api:
+    if args.from_json:
+        print(f"從 JSON 訓練：{args.from_json} / engine={engine}")
+        try:
+            X, y = load_dataset_from_json(args.from_json, engine)
+        except (OSError, json.JSONDecodeError, RuntimeError) as exc:
+            print(f"無法讀取 JSON：{exc}")
+            return 1
+    elif args.from_api:
         username = (args.username or os.environ.get("POSE_API_USERNAME") or "").strip()
         password = args.password or os.environ.get("POSE_API_PASSWORD") or ""
         if not username or not password:
@@ -282,7 +322,11 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     else:
         print(f"連線 MongoDB：{MONGO_URL} / db={MONGO_DB_NAME} / engine={engine}")
-        X, y = load_dataset(engine)
+        try:
+            X, y = load_dataset(engine)
+        except RuntimeError as exc:
+            print(exc)
+            return 1
     print(f"載入樣本數：{len(X)}（good={int((y == 1).sum()) if len(y) else 0}, bad={int((y == 0).sum()) if len(y) else 0}）")
 
     if args.export and len(X) > 0:

@@ -312,17 +312,91 @@ final class PoseDatabase {
         }
     }
 
-    func markTrainingUpload(sessionID: String, label: String) {
+    func markTrainingUpload(sessionID: String, label: String, uploadedToCloud: Bool = true) {
         let now = Date()
         queue.sync {
             guard let realm = try? openRealm() else { return }
             try? realm.write {
                 if let session = realm.object(ofType: RLMPoseSession.self, forPrimaryKey: sessionID) {
                     session.trainingLabel = label
-                    session.cloudUploadedAt = now
+                    if uploadedToCloud {
+                        session.cloudUploadedAt = now
+                    }
                 }
             }
         }
+    }
+
+    /// 匯出已標 good/bad 的 session（含節點），給 Mac `train.py --from-json` 使用。
+    func exportLabeledTrainingJSON() throws -> URL {
+        let engine = kind == .mediaPipe ? "mediapipe" : "pose"
+        let built: (payload: [String: Any]?, error: String?) = queue.sync {
+            guard let realm = try? openRealm() else {
+                return (nil, "無法開啟本機資料庫")
+            }
+            let labeled = realm.objects(RLMPoseSession.self).filter { session in
+                session.trainingLabel == "good" || session.trainingLabel == "bad"
+            }
+            guard !labeled.isEmpty else {
+                return (nil, "還沒有本機標好／壞的資料。請先在詳情頁標記。")
+            }
+            let sessionsPayload: [[String: Any]] = labeled.map { session in
+                let frames: [[String: Any]] = session.frames
+                    .sorted(by: { $0.frameIndex < $1.frameIndex })
+                    .map { frame in
+                        [
+                            "frame_index": frame.frameIndex,
+                            "timestamp": frame.timestamp,
+                            "nodes": frame.nodes.map { node in
+                                [
+                                    "joint": node.joint,
+                                    "x": node.x,
+                                    "y": node.y,
+                                    "z": node.z,
+                                    "visibility": node.visibility,
+                                    "presence": node.presence,
+                                ]
+                            },
+                        ]
+                    }
+                let source = session.sourceLabel
+                var doc: [String: Any] = [
+                    "_id": session.id,
+                    "label": session.trainingLabel ?? "",
+                    "source_label": kind == .mediaPipe && !source.hasPrefix("mediapipe")
+                        ? "mediapipe｜\(source)"
+                        : source,
+                    "engine": engine,
+                    "total_steps": session.totalSteps,
+                    "left_steps": session.leftSteps,
+                    "right_steps": session.rightSteps,
+                    "frames": frames,
+                ]
+                if let bpm = session.avgCadenceBPM {
+                    doc["avg_cadence_bpm"] = bpm
+                }
+                return doc
+            }
+            return (
+                [
+                    "engine": engine,
+                    "count": sessionsPayload.count,
+                    "sessions": sessionsPayload,
+                ],
+                nil
+            )
+        }
+        if let error = built.error {
+            throw NSError(domain: "PoseDatabase", code: 1, userInfo: [NSLocalizedDescriptionKey: error])
+        }
+        guard let payload = built.payload else {
+            throw NSError(domain: "PoseDatabase", code: 1, userInfo: [NSLocalizedDescriptionKey: "匯出失敗"])
+        }
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted])
+        let name = kind == .mediaPipe ? "mediapipe_training_export.json" : "pose_training_export.json"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        try data.write(to: url, options: .atomic)
+        return url
     }
 
     func clearAll() {

@@ -289,7 +289,7 @@ flowchart LR
 | 步驟 | 操作 | 檔案／命令 |
 |------|------|------------|
 | 1. 標註上傳 | App「節點資料庫」選 good/bad 上傳 | `PoseStreamClient.uploadLabeledSession` |
-| 2. 讀取資料 | 連 Atlas（`POSE_MONGO_URL`）或 `GET /dataset/export` | `train.py` → `load_dataset` / `--from-api` |
+| 2. 讀取資料 | 連 Atlas（完整 `POSE_MONGO_URL`，不要複製 `mongodb+srv://...`）、App 匯出 JSON，或 `GET /dataset/export` | `train.py` → `load_dataset` / `--from-json` / `--from-api` |
 | 3. 特徵 + 訓練 | 210 維 → RandomForest | `train.py` |
 | 4. 存模型 | `pose_quality_model.joblib` | 同目錄 |
 | 5. 部署 | commit + push → Railway rebuild | `backend/DEPLOY.md` |

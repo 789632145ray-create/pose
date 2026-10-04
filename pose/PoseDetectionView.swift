@@ -1952,6 +1952,8 @@ private struct PoseDatabaseSheet: View {
 
     @State private var records: [PoseSessionRecord] = []
     @State private var totalNodes: Int = 0
+    @State private var exportURL: URL?
+    @State private var exportError: String?
 
     private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -2046,8 +2048,50 @@ private struct PoseDatabaseSheet: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("完成", action: onClose)
+                    HStack(spacing: 12) {
+                        if records.contains(where: { $0.trainingLabel == "good" || $0.trainingLabel == "bad" }) {
+                            Button("匯出 JSON") {
+                                do {
+                                    exportError = nil
+                                    exportURL = try database.exportLabeledTrainingJSON()
+                                } catch {
+                                    exportError = error.localizedDescription
+                                }
+                            }
+                        }
+                        Button("完成", action: onClose)
+                    }
                 }
+            }
+            .sheet(isPresented: Binding(
+                get: { exportURL != nil },
+                set: { if !$0 { exportURL = nil } }
+            )) {
+                if let exportURL {
+                    NavigationStack {
+                        ShareLink(item: exportURL, preview: SharePreview(exportURL.lastPathComponent)) {
+                            Label("分享到 Mac / 檔案", systemImage: "square.and.arrow.up")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .padding()
+                        .navigationTitle("匯出訓練 JSON")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                Button("關閉") { self.exportURL = nil }
+                            }
+                        }
+                    }
+                    .presentationDetents([.medium])
+                }
+            }
+            .alert("匯出失敗", isPresented: Binding(
+                get: { exportError != nil },
+                set: { if !$0 { exportError = nil } }
+            )) {
+                Button("好", role: .cancel) {}
+            } message: {
+                Text(exportError ?? "")
             }
             .onAppear { reload() }
         }
@@ -2092,8 +2136,8 @@ private struct PoseSessionDetailView: View {
                 Text("此次偵測")
             } footer: {
                 Text(database.kind == .mediaPipe
-                     ? "MediaPipe 節點存在本機 mediapipe.realm。標好／壞上傳後，用 python train.py --engine mediapipe 訓練獨立模型。"
-                     : "在此標記好 / 壞並上傳至雲端，即可用 train.py 訓練模型。")
+                     ? "MediaPipe 節點存在本機 mediapipe.realm。標好／壞後可上傳雲端，或在資料庫按「匯出 JSON」，到 Mac 跑 python train.py --engine mediapipe --from-json 檔案.json。"
+                     : "在此標記好 / 壞並上傳至雲端，或匯出 JSON 給 train.py --from-json。")
             }
 
             if canLabel {
@@ -2177,11 +2221,13 @@ private struct PoseSessionDetailView: View {
             await MainActor.run {
                 isUploading = false
                 isUploadError = !result.success
-                statusMessage = result.message
+                trainingLabel = label
+                database.markTrainingUpload(sessionID: record.id, label: label, uploadedToCloud: result.success)
+                onUpdated()
                 if result.success {
-                    trainingLabel = label
-                    database.markTrainingUpload(sessionID: record.id, label: label)
-                    onUpdated()
+                    statusMessage = result.message
+                } else {
+                    statusMessage = "本機已標記，但沒傳到雲端：\(result.message)。可回資料庫按「匯出 JSON」，到 Mac 用 train.py --from-json 訓練。"
                 }
             }
         }

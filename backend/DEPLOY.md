@@ -60,12 +60,15 @@ iPhone 本機 Realm Database（純本機、不同步雲端）
 cd backend
 source .venv/bin/activate
 
-# 方式 A：連 Railway 同一個 Atlas
-export POSE_MONGO_URL="mongodb+srv://..."   # Railway Variables 裡的同款字串
+# 方式 A：連 Railway 同一個 Atlas（必須複製完整字串，不要用 mongodb+srv://...）
+export POSE_MONGO_URL="mongodb+srv://使用者:密碼@cluster0.xxxx.mongodb.net/"
 python train.py --engine mediapipe          # mediapipe_quality_model.joblib
 python train.py                             # pose_quality_model.joblib
 
-# 方式 B：用 App 帳號從雲端匯出（需已部署 /dataset/export）
+# 方式 B：App 資料庫「匯出 JSON」傳到 Mac
+python train.py --engine mediapipe --from-json mediapipe_training_export.json
+
+# 方式 C：用 App 帳號從雲端匯出（需已部署 /dataset/export）
 python train.py --engine mediapipe \
   --from-api https://runpose-backend-production.up.railway.app \
   --username 你的帳號 --password 你的密碼

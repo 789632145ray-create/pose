@@ -115,9 +115,9 @@ python train.py                         # QuickPose／自訓模型 → pose_qual
 python train.py --engine mediapipe      # MediaPipe 蒐集資料 → mediapipe_quality_model.joblib
 python train.py --engine mediapipe --export
 
-# 手機上傳在 Atlas；本機預設 localhost 是空的
-export POSE_MONGO_URL="mongodb+srv://..."
-python train.py --engine mediapipe --from-api https://runpose-backend-production.up.railway.app --username 帳號
+# 手機上傳在 Atlas；本機預設 localhost 是空的。不要複製 mongodb+srv://...
+export POSE_MONGO_URL="mongodb+srv://使用者:密碼@cluster0.xxxx.mongodb.net/"
+python train.py --engine mediapipe --from-json mediapipe_training_export.json
 ```
 
 - MediaPipe 會讀 `mediapipe_sessions`，以及回退寫進 `pose_sessions` 且 `engine=mediapipe` 的資料。
