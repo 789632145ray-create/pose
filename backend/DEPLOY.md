@@ -54,11 +54,21 @@ iPhone 本機 Realm Database（純本機、不同步雲端）
 
 ### 上傳訓練模型（品質辨識）
 
+手機上傳的標籤在 **Atlas**，本機 `train.py` 預設連 `mongodb://localhost:27017`（通常是空的）。請用和 Railway 相同的連線，或從雲端 API 拉資料：
+
 ```bash
 cd backend
 source .venv/bin/activate
-python train.py                      # pose_quality_model.joblib
-python train.py --engine mediapipe   # mediapipe_quality_model.joblib
+
+# 方式 A：連 Railway 同一個 Atlas
+export POSE_MONGO_URL="mongodb+srv://..."   # Railway Variables 裡的同款字串
+python train.py --engine mediapipe          # mediapipe_quality_model.joblib
+python train.py                             # pose_quality_model.joblib
+
+# 方式 B：用 App 帳號從雲端匯出（需已部署 /dataset/export）
+python train.py --engine mediapipe \
+  --from-api https://runpose-backend-production.up.railway.app \
+  --username 你的帳號 --password 你的密碼
 ```
 
 把對應的 `.joblib` commit 進 repo 或上傳到 Railway 容器 `/app/`，然後重啟服務。

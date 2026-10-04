@@ -278,9 +278,9 @@ iOS 端轉為 HUD：`即時預測：好 87%`（`LivePrediction.hudText`）。
 
 ```mermaid
 flowchart LR
-    A[App 節點資料庫<br/>標好/壞] -->|POST /poses| B[(MongoDB Atlas<br/>pose_sessions)]
-    B --> C[Mac: python train.py]
-    C --> D[pose_quality_model.joblib]
+    A[App 節點資料庫<br/>標好/壞] -->|POST /poses 或 /mediapipe/poses| B[(MongoDB Atlas)]
+    B --> C[Mac: train.py 須設 POSE_MONGO_URL 或 --from-api]
+    C --> D[pose / mediapipe_quality_model.joblib]
     D --> E[git push]
     E --> F[Railway 自動部署]
     F --> G[POST /predict 可用]
@@ -289,7 +289,7 @@ flowchart LR
 | 步驟 | 操作 | 檔案／命令 |
 |------|------|------------|
 | 1. 標註上傳 | App「節點資料庫」選 good/bad 上傳 | `PoseStreamClient.uploadLabeledSession` |
-| 2. 讀取資料 | 從 MongoDB 讀已標註 session | `train.py` → `load_dataset` |
+| 2. 讀取資料 | 連 Atlas（`POSE_MONGO_URL`）或 `GET /dataset/export` | `train.py` → `load_dataset` / `--from-api` |
 | 3. 特徵 + 訓練 | 210 維 → RandomForest | `train.py` |
 | 4. 存模型 | `pose_quality_model.joblib` | 同目錄 |
 | 5. 部署 | commit + push → Railway rebuild | `backend/DEPLOY.md` |

@@ -76,6 +76,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 | POST | `/poses` | 上傳一段姿勢節點 + 標籤（整段，需帶權杖） | `{"label":"good\|bad","frames":[...],...}` |
 | GET  | `/poses` | 列出自己上傳過的 session（不含 frames） | Header `Authorization: Bearer <token>` |
 | GET  | `/dataset/stats` | 資料集統計（各標籤筆數） | Header `Authorization: Bearer <token>` |
+| GET  | `/dataset/export` | 匯出目前帳號已標籤 session（含節點，供 `train.py --from-api`） | Query `engine=pose\|mediapipe\|all` |
 | POST | `/mediapipe/poses` | 上傳 MediaPipe 骨架到獨立 `mediapipe_sessions` | 同 `/poses`（舊版雲端若 404，App 會改傳 `/poses`） |
 | GET  | `/mediapipe/poses` | 列出自己的 MediaPipe session | Header `Authorization: Bearer <token>` |
 | GET  | `/mediapipe/dataset/stats` | MediaPipe 資料集統計 | Header `Authorization: Bearer <token>` |
@@ -104,7 +105,8 @@ curl -X POST http://127.0.0.1:8000/auth/login \
 
 ## 5. 監督式學習：訓練姿勢品質模型
 
-App 端在「節點資料庫」畫面選好「好 / 壞」標籤並上傳幾筆資料後，即可訓練：
+App 端在「節點資料庫」畫面選好「好 / 壞」標籤並上傳幾筆資料後，即可訓練。
+手機上傳寫入 **Railway → Atlas**；本機直接跑 `python train.py` 若沒設 `POSE_MONGO_URL`，會連到空的 `localhost:27017`，看起來像「沒上傳」。
 
 ```bash
 cd backend
@@ -112,6 +114,10 @@ source .venv/bin/activate
 python train.py                         # QuickPose／自訓模型 → pose_quality_model.joblib
 python train.py --engine mediapipe      # MediaPipe 蒐集資料 → mediapipe_quality_model.joblib
 python train.py --engine mediapipe --export
+
+# 手機上傳在 Atlas；本機預設 localhost 是空的
+export POSE_MONGO_URL="mongodb+srv://..."
+python train.py --engine mediapipe --from-api https://runpose-backend-production.up.railway.app --username 帳號
 ```
 
 - MediaPipe 會讀 `mediapipe_sessions`，以及回退寫進 `pose_sessions` 且 `engine=mediapipe` 的資料。

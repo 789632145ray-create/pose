@@ -13,13 +13,22 @@
   python train.py --engine mediapipe      # 訓練 MediaPipe 蒐集資料 → mediapipe_quality_model.joblib
   python train.py --engine mediapipe --export
   python train.py --engine all            # 兩套資料合併成 pose_quality_model.joblib
+
+  # 手機上傳到 Railway／Atlas，本機 train.py 預設連 localhost（通常是空的）。
+  # 請用和 Railway 相同的 Atlas 連線，或從雲端 API 拉你帳號標好的資料：
+  export POSE_MONGO_URL="mongodb+srv://..."
+  python train.py --engine mediapipe
+  python train.py --engine mediapipe --from-api https://runpose-backend-production.up.railway.app --username 帳號
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+import urllib.error
+import urllib.request
 
 import joblib
 import numpy as np
@@ -133,6 +142,88 @@ def load_dataset(engine: str = "pose") -> tuple[np.ndarray, np.ndarray]:
         client.close()
 
 
+def _http_json(method: str, url: str, *, body: dict | None = None, headers: dict | None = None) -> dict:
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Accept", "application/json")
+    if body is not None:
+        req.add_header("Content-Type", "application/json")
+    for key, value in (headers or {}).items():
+        req.add_header(key, value)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            raw = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"{exc.code} {url}：{detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"無法連線 {url}：{exc.reason}") from exc
+    return json.loads(raw) if raw else {}
+
+
+def fetch_docs_from_api(base_url: str, username: str, password: str, engine: str) -> list[dict]:
+    base = base_url.rstrip("/")
+    login = _http_json(
+        "POST",
+        f"{base}/auth/login",
+        body={"username": username, "password": password},
+    )
+    token = str(login.get("access_token") or "").strip()
+    if not token:
+        raise RuntimeError("登入成功但沒有 access_token")
+    payload = _http_json(
+        "GET",
+        f"{base}/dataset/export?engine={engine}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    sessions = payload.get("sessions")
+    if not isinstance(sessions, list):
+        raise RuntimeError("雲端 /dataset/export 回傳格式不正確（可能尚未部署此 API）")
+    print(
+        f"雲端匯出：{payload.get('count', len(sessions))} 筆"
+        f"（good={payload.get('by_label', {}).get('good', '?')},"
+        f" bad={payload.get('by_label', {}).get('bad', '?')}）"
+    )
+    return sessions
+
+
+def load_dataset_from_api(base_url: str, username: str, password: str, engine: str) -> tuple[np.ndarray, np.ndarray]:
+    return rows_from_docs(fetch_docs_from_api(base_url, username, password, engine))
+
+
+def empty_dataset_hint(engine: str, mongo_url: str, from_api: bool) -> str:
+    lines = [
+        "樣本太少（至少需要約 4 筆，且兩種標籤都要有）。",
+        "",
+        "手機 App「標記為好／壞」上傳的是 Railway 後面的 MongoDB Atlas，",
+        "不是這台電腦預設的 mongodb://localhost:27017。",
+        "本機 Realm 標籤也不會自動同步到雲端以外的資料庫。",
+    ]
+    if from_api:
+        lines += [
+            "",
+            "若 --from-api 仍是 0 筆：請確認 App 詳情頁有出現「上傳成功」，",
+            "且登入的是同一個帳號；雲端需已部署含 /dataset/export 的後端。",
+        ]
+    elif "localhost" in mongo_url or "127.0.0.1" in mongo_url:
+        lines += [
+            "",
+            "你現在連的是本機空庫。請改連 Atlas，或從雲端 API 拉資料：",
+            "  export POSE_MONGO_URL=\"mongodb+srv://（Railway 變數同款連線字串）\"",
+            f"  python train.py --engine {engine}",
+            "",
+            "或（部署新後端後）：",
+            f"  python train.py --engine {engine} --from-api https://runpose-backend-production.up.railway.app --username 帳號",
+        ]
+    else:
+        lines += [
+            "",
+            "請到 App 節點庫點進該筆，按「標記為好 (good)／壞 (bad)」，",
+            "畫面上要出現「上傳成功」才會進雲端。",
+        ]
+    return "\n".join(lines)
+
+
 def export_csv(X: np.ndarray, y: np.ndarray, path: str) -> None:
     header = ",".join(FEATURE_COLUMNS + ["label"])
     rows = [header]
@@ -152,6 +243,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="pose=QuickPose／自訓模型；mediapipe=MediaPipe 蒐集資料；all=合併",
     )
     parser.add_argument("--export", action="store_true", help="另外匯出 CSV")
+    parser.add_argument(
+        "--from-api",
+        metavar="URL",
+        help="改從雲端 GET /dataset/export 拉目前帳號已上傳的標籤資料（不連本機 Mongo）",
+    )
+    parser.add_argument("--username", help="--from-api 登入帳號（也可用環境變數 POSE_API_USERNAME）")
+    parser.add_argument("--password", help="--from-api 登入密碼（也可用環境變數 POSE_API_PASSWORD）")
     return parser.parse_args(argv)
 
 
@@ -169,17 +267,29 @@ def main(argv: list[str] | None = None) -> int:
     out_model = model_output_path(engine)
     out_csv = csv_output_path(engine)
 
-    print(f"連線 MongoDB：{MONGO_URL} / db={MONGO_DB_NAME} / engine={engine}")
-    X, y = load_dataset(engine)
+    if args.from_api:
+        username = (args.username or os.environ.get("POSE_API_USERNAME") or "").strip()
+        password = args.password or os.environ.get("POSE_API_PASSWORD") or ""
+        if not username or not password:
+            print("使用 --from-api 時請提供 --username / --password，或設 POSE_API_USERNAME、POSE_API_PASSWORD。")
+            return 1
+        print(f"從雲端 API 拉資料：{args.from_api} / engine={engine} / user={username}")
+        try:
+            X, y = load_dataset_from_api(args.from_api, username, password, engine)
+        except RuntimeError as exc:
+            print(f"無法從雲端匯出訓練資料：{exc}")
+            print(empty_dataset_hint(engine, MONGO_URL, from_api=True))
+            return 1
+    else:
+        print(f"連線 MongoDB：{MONGO_URL} / db={MONGO_DB_NAME} / engine={engine}")
+        X, y = load_dataset(engine)
     print(f"載入樣本數：{len(X)}（good={int((y == 1).sum()) if len(y) else 0}, bad={int((y == 0).sum()) if len(y) else 0}）")
 
     if args.export and len(X) > 0:
         export_csv(X, y, out_csv)
 
     if len(X) < 4:
-        print("樣本太少（至少需要約 4 筆，且兩種標籤都要有）。")
-        print("請用 App 切到 MediaPipe，偵測後在節點庫標「好／壞」並上傳，再跑：")
-        print("  python train.py --engine mediapipe")
+        print(empty_dataset_hint(engine, MONGO_URL, from_api=bool(args.from_api)))
         return 1
     if len(set(y.tolist())) < 2:
         print("目前只有單一標籤，無法做二元分類。請補上另一種標籤的資料。")

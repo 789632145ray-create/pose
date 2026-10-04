@@ -1,6 +1,13 @@
 import unittest
 
-from train import is_mediapipe_training_doc, labeled_feature_row, rows_from_docs, session_features
+from train import (
+    empty_dataset_hint,
+    is_mediapipe_training_doc,
+    labeled_feature_row,
+    parse_args,
+    rows_from_docs,
+    session_features,
+)
 
 
 class TrainDatasetTests(unittest.TestCase):
@@ -37,6 +44,27 @@ class TrainDatasetTests(unittest.TestCase):
 
     def test_labeled_feature_row_rejects_empty_frames(self):
         self.assertIsNone(labeled_feature_row({"label": "good", "frames": []}))
+
+    def test_empty_dataset_hint_mentions_localhost_vs_railway(self):
+        hint = empty_dataset_hint("mediapipe", "mongodb://localhost:27017", from_api=False)
+        self.assertIn("localhost", hint)
+        self.assertIn("POSE_MONGO_URL", hint)
+        self.assertIn("--from-api", hint)
+
+    def test_parse_from_api_args(self):
+        args = parse_args(
+            [
+                "--engine",
+                "mediapipe",
+                "--from-api",
+                "https://runpose-backend-production.up.railway.app",
+                "--username",
+                "tester",
+            ]
+        )
+        self.assertEqual(args.engine, "mediapipe")
+        self.assertTrue(args.from_api.endswith(".railway.app"))
+        self.assertEqual(args.username, "tester")
 
 
 if __name__ == "__main__":

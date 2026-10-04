@@ -460,6 +460,34 @@ def _dataset_stats(collection) -> dict:
     }
 
 
+def _is_mediapipe_doc(doc: dict) -> bool:
+    engine = str(doc.get("engine") or "").strip().lower()
+    source = str(doc.get("source_label") or "").strip().lower()
+    return engine == "mediapipe" or source.startswith("mediapipe")
+
+
+def _export_doc(doc: dict) -> dict:
+    out = dict(doc)
+    if "_id" in out:
+        out["_id"] = str(out["_id"])
+    return out
+
+
+def _export_labeled(collection, username: str) -> list[dict]:
+    query = {"user": username, "label": {"$in": sorted(VALID_LABELS)}}
+    return [_export_doc(doc) for doc in collection.find(query)]
+
+
+def _export_training_sessions(username: str, engine: str) -> list[dict]:
+    sessions: list[dict] = []
+    if engine in ("mediapipe", "all"):
+        sessions.extend(_export_labeled(mediapipe_sessions, username))
+        sessions.extend(doc for doc in _export_labeled(pose_sessions, username) if _is_mediapipe_doc(doc))
+    if engine in ("pose", "all"):
+        sessions.extend(doc for doc in _export_labeled(pose_sessions, username) if not _is_mediapipe_doc(doc))
+    return sessions
+
+
 @app.post("/poses", response_model=PoseUploadResponse, status_code=status.HTTP_201_CREATED)
 def upload_pose_session(session: PoseSessionIn, username: str = Depends(current_user)) -> PoseUploadResponse:
     return _insert_labeled_session(pose_sessions, session, username, engine="pose")
@@ -490,6 +518,26 @@ def list_mediapipe_sessions(username: str = Depends(current_user)) -> List[PoseS
 @app.get("/mediapipe/dataset/stats")
 def mediapipe_dataset_stats(username: str = Depends(current_user)) -> dict:
     return _dataset_stats(mediapipe_sessions)
+
+
+@app.get("/dataset/export")
+def dataset_export(engine: str = "all", username: str = Depends(current_user)) -> dict:
+    """匯出目前帳號已標籤（good/bad）且含節點的 session，供本機 train.py --from-api 使用。"""
+    kind = engine.strip().lower() or "all"
+    if kind not in ("pose", "mediapipe", "all"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="engine 必須是 pose、mediapipe 或 all")
+    try:
+        sessions = _export_training_sessions(username, kind)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"無法匯出資料集：{exc}")
+    good = sum(1 for doc in sessions if doc.get("label") == "good")
+    bad = sum(1 for doc in sessions if doc.get("label") == "bad")
+    return {
+        "engine": kind,
+        "count": len(sessions),
+        "by_label": {"good": good, "bad": bad},
+        "sessions": sessions,
+    }
 
 
 # ---------------------------------------------------------------------------
