@@ -9,6 +9,8 @@
 	</dict>
 	<key>PoseServerBaseURL</key>
 	<string>https://runpose-backend-production.up.railway.app</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>需要相簿以選擇影片進行姿勢偵測。</string>
 	<key>QuickPoseSDKKey</key>
 	<string>01KPK05E121GEXBN9J38DZR1V6</string>
 </dict>

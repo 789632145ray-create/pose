@@ -262,6 +262,18 @@ enum PoseIssueCode: Hashable {
     case limitedHipExtension
     case trunkInstability
     case forwardStoop
+    case raisedArms
+    case excessiveArmSwing
+    case ipsilateralArmSwing
+    case forefootStrike
+    case incompleteToeOff
+    case waistHingeLean
+    case insufficientForwardLean
+    case excessiveForwardLean
+    case pelvisInstability
+    case heelStrikeWhileRunning
+    case elbowAngleOff
+    case armCrossMidline
 
     var summaryDescription: String {
         switch self {
@@ -276,6 +288,18 @@ enum PoseIssueCode: Hashable {
         case .limitedHipExtension: return "髖伸展不足"
         case .trunkInstability: return "軀幹偏移／平衡不穩"
         case .forwardStoop: return "上背或頭部前傾"
+        case .raisedArms: return "手臂未自然下垂"
+        case .excessiveArmSwing: return "擺臂幅度過大"
+        case .ipsilateralArmSwing: return "同側擺臂（未對側配合）"
+        case .forefootStrike: return "腳尖／前腳掌先著地"
+        case .incompleteToeOff: return "腳尖蹬地不足"
+        case .waistHingeLean: return "從腰部彎曲前傾"
+        case .insufficientForwardLean: return "跑步前傾不足"
+        case .excessiveForwardLean: return "跑步前傾過大"
+        case .pelvisInstability: return "骨盆不穩／左右搖晃"
+        case .heelStrikeWhileRunning: return "跑步用腳跟著地"
+        case .elbowAngleOff: return "手肘未保持約 90 度"
+        case .armCrossMidline: return "擺臂越過身體中線"
         }
     }
 }
@@ -289,6 +313,8 @@ final class PoseAnalysisPipeline {
 
     /// 由登入使用者的身高／體重衍生的步態個人化檔案。
     var bodyProfile: BodyGaitProfile?
+    /// 走路或跑步，決定用哪一套姿勢核心。
+    var activityMode: GaitActivityMode = .walking
 
     var totalSteps: Int { stepDetector.totalSteps }
     var leftSteps: Int { stepDetector.leftSteps }
@@ -313,7 +339,7 @@ final class PoseAnalysisPipeline {
         for code in issues {
             issueCounts[code, default: 0] += 1
         }
-        gaitMetrics.ingest(landmarks: landmarks, profile: bodyProfile)
+        gaitMetrics.ingest(landmarks: landmarks, profile: bodyProfile, activity: activityMode)
         let raw = PoseKeypointExtractor.extract(landmarks)
         let smoothed = lowPass.pushAndAverage(raw)
 
@@ -367,6 +393,13 @@ final class PoseAnalysisPipeline {
         let avgCadence: Double? = bpms.isEmpty ? nil : bpms.reduce(0, +) / Double(bpms.count)
         if !bpms.isEmpty, let avg = avgCadence {
             out.append(String(format: "平均步頻：%.0f bpm", avg))
+        }
+
+        switch activityMode {
+        case .walking:
+            out.append(contentsOf: WalkingFormAdvisor.sessionSummary(metrics: gaitMetrics))
+        case .running:
+            out.append(contentsOf: RunningFormAdvisor.sessionSummary(metrics: gaitMetrics))
         }
 
         if let profile = bodyProfile, let avg = avgCadence {

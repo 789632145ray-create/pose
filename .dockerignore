@@ -1,0 +1,12 @@
+**/.venv/
+**/__pycache__/
+**/*.pyc
+.git/
+pose/
+pose.xcodeproj/
+poseTests/
+poseUITests/
+*.md
+*.docx
+*.realm
+DerivedData/

@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+app.db
+app.db-journal
+app.db-wal
+app.db-shm
+server.log
+server_test.log
+dataset.csv
