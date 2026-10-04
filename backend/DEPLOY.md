@@ -34,9 +34,24 @@ iPhone 本機 Realm Database（純本機、不同步雲端）
 
 ## 第二步：部署到 Railway（建議）
 
+Railway **只跑後端 API**，不會出現 iOS App（App 用 Xcode 裝在手機）。  
+現在正式站連的是舊的 `runpose-backend`（沒有 MediaPipe、`/dataset/export`）。請改連這個 `pose` repo 的 `backend/`。
+
+### 已有 Railway 專案（改連線來源）
+
+1. 打開 [Railway](https://railway.app) → 你的服務（`runpose-backend-production`）
+2. **Settings → Source**
+3. Repo 改成 **`789632145ray-create/pose`**
+4. Branch 先選 **`cursor/add-runpose-backend-dd14`**（合併進 `main` 後再改 `main`）
+5. **Root Directory** 填 **`backend`**（這裡才有 `main.py` / `Dockerfile`）
+6. **Variables 不要清掉**（`POSE_MONGO_URL`、`POSE_SECRET_KEY` 留著）
+7. **Deploy** 等綠燈後打開：
+   - `https://你的網址/health/mongo`
+   - `https://你的網址/health/model/mediapipe`（新後端才會有；還沒訓練模型時可能顯示尚未訓練）
+
 1. 到 [Railway](https://railway.app) 用 GitHub 登入
-2. **New Project** → **Deploy from GitHub repo** → 選 **`runpose-backend`**
-3. **Root Directory**：repo 根目錄就是 `main.py` 時 **留空**
+2. **New Project** → **Deploy from GitHub repo** → 選 **`pose`**（或舊的 `runpose-backend`）
+3. **Root Directory**：連 `pose` 時填 **`backend`**；連 `runpose-backend` 且 `main.py` 在根目錄時 **留空**
 4. **Variables** 新增：
 
    | 變數 | 值 |
