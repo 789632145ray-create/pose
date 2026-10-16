@@ -307,6 +307,8 @@ struct PoseDetectionView: View {
     private let database = PoseDatabase.shared
     /// 目前進行中的資料庫 session id（nil 代表沒有進行中的 session）。
     @State private var dbSessionID: String?
+    /// 最近一次已結束、仍可供「品質辨識與摘要」讀取的 session（暫停後 dbSessionID 會清空）。
+    @State private var lastAnalyzableSessionID: String?
     @State private var showDatabase = false
 
     /// 每幀即時串流上傳 + 即時預測。
@@ -716,7 +718,11 @@ struct PoseDetectionView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.indigo)
-                .disabled(isAnalyzingVideoQuality || Self.sdkKeyIsPlaceholder)
+                .disabled(
+                    isAnalyzingVideoQuality
+                        || Self.sdkKeyIsPlaceholder
+                        || (dbSessionID == nil && lastAnalyzableSessionID == nil)
+                )
 
                 Button {
                     switchBackToCamera()
@@ -847,6 +853,9 @@ struct PoseDetectionView: View {
             resetStepUIState()
             livePrediction = nil
             videoQualityResult = nil
+            // 切換相機／影片來源時清空，避免誤用上一支影片的節點。
+            lastAnalyzableSessionID = nil
+            summaryLines = []
         }
     }
 
@@ -905,20 +914,43 @@ struct PoseDetectionView: View {
         return lines
     }
 
-    /// 偵測／分析完成後自動寫入歷史紀錄（同一 session 只存一次）。
+    /// 偵測／分析完成後自動寫入歷史紀錄（同一 session 只存一次；品質辨識補齊後可更新同一筆）。
     @MainActor
     private func autoSaveSummaryToHistory() {
-        guard !historySavedForSession else { return }
         let lines = summaryLines.isEmpty ? buildSummaryLinesForHistory() : summaryLines
         guard !lines.isEmpty else { return }
+
+        // 暫停後 analysisPipeline 已被 reset；優先沿用已存摘要／Realm session 的步態統計。
+        let existing = lastSavedID.flatMap { id in summaryStore.items.first(where: { $0.id == id }) }
+        let ended = lastAnalyzableSessionID.flatMap { id in database.sessions().first(where: { $0.id == id }) }
+        let totalSteps = analysisPipeline.totalSteps > 0 ? analysisPipeline.totalSteps : (existing?.totalSteps ?? ended?.totalSteps ?? 0)
+        let leftSteps = analysisPipeline.leftSteps > 0 ? analysisPipeline.leftSteps : (existing?.leftSteps ?? ended?.leftSteps ?? 0)
+        let rightSteps = analysisPipeline.rightSteps > 0 ? analysisPipeline.rightSteps : (existing?.rightSteps ?? ended?.rightSteps ?? 0)
+        let avgCadence = analysisPipeline.avgCadenceBPM ?? existing?.avgCadenceBPM ?? ended?.avgCadenceBPM
+
+        if historySavedForSession, let existingID = lastSavedID {
+            summaryStore.add(
+                SavedSummary(
+                    id: existingID,
+                    date: existing?.date ?? Date(),
+                    sourceLabel: currentSourceLabel,
+                    totalSteps: totalSteps,
+                    leftSteps: leftSteps,
+                    rightSteps: rightSteps,
+                    avgCadenceBPM: avgCadence,
+                    lines: lines
+                )
+            )
+            return
+        }
         let summary = SavedSummary(
             id: UUID(),
             date: Date(),
             sourceLabel: currentSourceLabel,
-            totalSteps: analysisPipeline.totalSteps,
-            leftSteps: analysisPipeline.leftSteps,
-            rightSteps: analysisPipeline.rightSteps,
-            avgCadenceBPM: analysisPipeline.avgCadenceBPM,
+            totalSteps: totalSteps,
+            leftSteps: leftSteps,
+            rightSteps: rightSteps,
+            avgCadenceBPM: avgCadence,
             lines: lines
         )
         summaryStore.add(summary)
@@ -934,7 +966,9 @@ struct PoseDetectionView: View {
     /// 結束目前資料庫 session，把最終步態統計一併寫入。
     @MainActor
     private func finishDatabaseSession() {
-        guard dbSessionID != nil else { return }
+        guard let id = dbSessionID else { return }
+        // 節點已落盤；保留 id 供暫停後「品質辨識與摘要」讀取。
+        lastAnalyzableSessionID = id
         database.endSession(
             totalSteps: analysisPipeline.totalSteps,
             leftSteps: analysisPipeline.leftSteps,
@@ -1073,12 +1107,17 @@ struct PoseDetectionView: View {
 
     @MainActor
     private func analyzeVideoQualityAndShowSummary() {
-        summaryLines = analysisPipeline.videoSummary()
+        // 播放中：用即時管線摘要。暫停後管線已被 reset，改保留暫停時寫入的 summaryLines。
+        let pipelineLines = analysisPipeline.videoSummary()
+        if !pipelineLines.isEmpty {
+            summaryLines = pipelineLines
+        }
         videoQualityResult = nil
         isAnalyzingVideoQuality = true
         showSummary = true
 
-        let sessionID = dbSessionID
+        // 播放中用進行中 session；暫停後改用剛結束、已寫入 Realm 的 session。
+        let sessionID = dbSessionID ?? lastAnalyzableSessionID
         Task {
             let frames = sessionID.map { database.allFrames(sessionID: $0) } ?? []
             let result = await stream.predict(frames: frames)
@@ -1088,9 +1127,13 @@ struct PoseDetectionView: View {
                 if let result, result.note == nil, let label = result.label {
                     let pct = Int(result.confidencePercent)
                     let qualityLine = "模型辨識：姿勢「\(label == "good" ? "好" : "壞")」（信心 \(pct)%）"
-                    if !summaryLines.contains(where: { $0.hasPrefix("模型辨識：") }) {
-                        summaryLines.insert(qualityLine, at: 0)
+                    summaryLines.removeAll { $0.hasPrefix("模型辨識：") }
+                    if summaryLines.isEmpty {
+                        summaryLines = pipelineLines.isEmpty
+                            ? ["尚未累積步態摘要；模型品質辨識如下。"]
+                            : pipelineLines
                     }
+                    summaryLines.insert(qualityLine, at: 0)
                 }
                 autoSaveSummaryToHistory()
             }
@@ -1504,7 +1547,7 @@ private struct VideoSummarySheet: View {
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                    Text("註：分析完成後會自動寫入歷史紀錄；可在影片繼續播放後再開啟，數值會更完整。")
+                    Text("註：播放中或暫停後都可辨識；分析完成後會自動寫入歷史紀錄。影片播得越完整，摘要通常越準。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .padding(.top, 6)
