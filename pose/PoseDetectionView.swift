@@ -307,6 +307,10 @@ struct PoseDetectionView: View {
     private let database = PoseDatabase.shared
     /// 目前進行中的資料庫 session id（nil 代表沒有進行中的 session）。
     @State private var dbSessionID: String?
+    /// 最近一次已結束、仍可供「品質辨識與摘要」讀取的 session（暫停後 dbSessionID 會清空）。
+    @State private var lastAnalyzableSessionID: String?
+    /// 暫停前從串流截下的影格；Realm 讀取失敗時仍可供品質辨識。
+    @State private var cachedSessionFrames: [PoseStreamClient.WireFrame] = []
     @State private var showDatabase = false
 
     /// 每幀即時串流上傳 + 即時預測。
@@ -716,7 +720,15 @@ struct PoseDetectionView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.indigo)
-                .disabled(isAnalyzingVideoQuality || Self.sdkKeyIsPlaceholder)
+                .disabled(
+                    isAnalyzingVideoQuality
+                        || Self.sdkKeyIsPlaceholder
+                        || (dbSessionID == nil
+                            && lastAnalyzableSessionID == nil
+                            && cachedSessionFrames.isEmpty
+                            && !analysisPipeline.hasEvaluatedFrames
+                            && summaryLines.isEmpty)
+                )
 
                 Button {
                     switchBackToCamera()
@@ -847,14 +859,26 @@ struct PoseDetectionView: View {
             resetStepUIState()
             livePrediction = nil
             videoQualityResult = nil
+            // 切換相機／影片來源時清空，避免誤用上一支影片的節點。
+            lastAnalyzableSessionID = nil
+            cachedSessionFrames = []
+            summaryLines = []
         }
     }
 
     /// 使用者暫停：只停資料寫入，QuickPose 引擎保持運轉（官方 demo 僅 onDisappear 才 stop）。
+    /// - Parameter preserveAnalysis: 為 true 時保留摘要列／快取影格／品質結果（影片暫停後要開摘要用）。
     @MainActor
-    private func pauseDetectionProcessing(fullReset: Bool) {
+    private func pauseDetectionProcessing(fullReset: Bool, preserveAnalysis: Bool = false) {
         cancelCountdown()
         quickPoseEngine.detectionActive = false
+        // 必須在 stopStreaming（會 reset 串流緩衝）之前截下影格。
+        if preserveAnalysis || fullReset {
+            let snap = stream.snapshotSessionFrames()
+            if !snap.isEmpty {
+                cachedSessionFrames = snap
+            }
+        }
         finishDatabaseSession()
         stopStreaming()
         quickPoseEngine.isEngineStarting = false
@@ -862,8 +886,10 @@ struct PoseDetectionView: View {
         if fullReset {
             analysisPipeline.reset()
             resetStepUIState()
-            livePrediction = nil
-            videoQualityResult = nil
+            if !preserveAnalysis {
+                livePrediction = nil
+                videoQualityResult = nil
+            }
             quickPoseEngine.dbNodeCount = 0
         }
     }
@@ -905,20 +931,43 @@ struct PoseDetectionView: View {
         return lines
     }
 
-    /// 偵測／分析完成後自動寫入歷史紀錄（同一 session 只存一次）。
+    /// 偵測／分析完成後自動寫入歷史紀錄（同一 session 只存一次；品質辨識補齊後可更新同一筆）。
     @MainActor
     private func autoSaveSummaryToHistory() {
-        guard !historySavedForSession else { return }
         let lines = summaryLines.isEmpty ? buildSummaryLinesForHistory() : summaryLines
         guard !lines.isEmpty else { return }
+
+        // 暫停後 analysisPipeline 已被 reset；優先沿用已存摘要／Realm session 的步態統計。
+        let existing = lastSavedID.flatMap { id in summaryStore.items.first(where: { $0.id == id }) }
+        let ended = lastAnalyzableSessionID.flatMap { id in database.sessions().first(where: { $0.id == id }) }
+        let totalSteps = analysisPipeline.totalSteps > 0 ? analysisPipeline.totalSteps : (existing?.totalSteps ?? ended?.totalSteps ?? 0)
+        let leftSteps = analysisPipeline.leftSteps > 0 ? analysisPipeline.leftSteps : (existing?.leftSteps ?? ended?.leftSteps ?? 0)
+        let rightSteps = analysisPipeline.rightSteps > 0 ? analysisPipeline.rightSteps : (existing?.rightSteps ?? ended?.rightSteps ?? 0)
+        let avgCadence = analysisPipeline.avgCadenceBPM ?? existing?.avgCadenceBPM ?? ended?.avgCadenceBPM
+
+        if historySavedForSession, let existingID = lastSavedID {
+            summaryStore.add(
+                SavedSummary(
+                    id: existingID,
+                    date: existing?.date ?? Date(),
+                    sourceLabel: currentSourceLabel,
+                    totalSteps: totalSteps,
+                    leftSteps: leftSteps,
+                    rightSteps: rightSteps,
+                    avgCadenceBPM: avgCadence,
+                    lines: lines
+                )
+            )
+            return
+        }
         let summary = SavedSummary(
             id: UUID(),
             date: Date(),
             sourceLabel: currentSourceLabel,
-            totalSteps: analysisPipeline.totalSteps,
-            leftSteps: analysisPipeline.leftSteps,
-            rightSteps: analysisPipeline.rightSteps,
-            avgCadenceBPM: analysisPipeline.avgCadenceBPM,
+            totalSteps: totalSteps,
+            leftSteps: leftSteps,
+            rightSteps: rightSteps,
+            avgCadenceBPM: avgCadence,
             lines: lines
         )
         summaryStore.add(summary)
@@ -934,7 +983,9 @@ struct PoseDetectionView: View {
     /// 結束目前資料庫 session，把最終步態統計一併寫入。
     @MainActor
     private func finishDatabaseSession() {
-        guard dbSessionID != nil else { return }
+        guard let id = dbSessionID else { return }
+        // 節點已落盤；保留 id 供暫停後「品質辨識與摘要」讀取。
+        lastAnalyzableSessionID = id
         database.endSession(
             totalSteps: analysisPipeline.totalSteps,
             leftSteps: analysisPipeline.leftSteps,
@@ -1073,28 +1124,72 @@ struct PoseDetectionView: View {
 
     @MainActor
     private func analyzeVideoQualityAndShowSummary() {
-        summaryLines = analysisPipeline.videoSummary()
+        // 僅在仍有評估幀時覆寫摘要；暫停後 pipeline 已 reset，不可用「尚未取得…」蓋掉既有摘要。
+        if analysisPipeline.hasEvaluatedFrames {
+            summaryLines = analysisPipeline.videoSummary()
+        } else if summaryLines.isEmpty {
+            summaryLines = analysisPipeline.videoSummary()
+        }
+
+        let fallbackQuality = videoQualityResult ?? livePrediction
+        // 優先用記憶體快取／串流快照，再退回 Realm。
+        var wireFrames = cachedSessionFrames
+        if wireFrames.isEmpty {
+            wireFrames = stream.snapshotSessionFrames()
+            if !wireFrames.isEmpty { cachedSessionFrames = wireFrames }
+        }
+        let sessionID = dbSessionID ?? lastAnalyzableSessionID
+
         videoQualityResult = nil
         isAnalyzingVideoQuality = true
         showSummary = true
 
-        let sessionID = dbSessionID
         Task {
-            let frames = sessionID.map { database.allFrames(sessionID: $0) } ?? []
-            let result = await stream.predict(frames: frames)
-            await MainActor.run {
-                videoQualityResult = result
-                isAnalyzingVideoQuality = false
-                if let result, result.note == nil, let label = result.label {
-                    let pct = Int(result.confidencePercent)
-                    let qualityLine = "模型辨識：姿勢「\(label == "good" ? "好" : "壞")」（信心 \(pct)%）"
-                    if !summaryLines.contains(where: { $0.hasPrefix("模型辨識：") }) {
-                        summaryLines.insert(qualityLine, at: 0)
-                    }
+            if wireFrames.isEmpty, let sessionID {
+                // 等 Realm 非同步寫入排空後再讀。
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                let records = database.allFrames(sessionID: sessionID)
+                let result = await stream.predict(frames: records)
+                await MainActor.run {
+                    applyVideoQualityResult(result, fallback: fallbackQuality)
                 }
-                autoSaveSummaryToHistory()
+                return
+            }
+            let result: LivePrediction?
+            if wireFrames.isEmpty {
+                result = fallbackQuality
+                    ?? LivePrediction(label: nil, probabilityGood: 0, note: "尚無節點資料")
+            } else {
+                result = await stream.predict(frames: wireFrames)
+            }
+            await MainActor.run {
+                applyVideoQualityResult(result, fallback: fallbackQuality)
             }
         }
+    }
+
+    @MainActor
+    private func applyVideoQualityResult(_ result: LivePrediction?, fallback: LivePrediction?) {
+        let resolved: LivePrediction?
+        if let result, result.note == nil {
+            resolved = result
+        } else if let fallback, fallback.note == nil {
+            resolved = fallback
+        } else {
+            resolved = result ?? fallback
+        }
+        videoQualityResult = resolved
+        isAnalyzingVideoQuality = false
+        if let resolved, resolved.note == nil, let label = resolved.label {
+            let pct = Int(resolved.confidencePercent)
+            let qualityLine = "模型辨識：姿勢「\(label == "good" ? "好" : "壞")」（信心 \(pct)%）"
+            summaryLines.removeAll { $0.hasPrefix("模型辨識：") }
+            if summaryLines.isEmpty {
+                summaryLines = ["尚未累積步態摘要；模型品質辨識如下。"]
+            }
+            summaryLines.insert(qualityLine, at: 0)
+        }
+        autoSaveSummaryToHistory()
     }
 
     private var deniedPanel: some View {
@@ -1380,6 +1475,22 @@ struct PoseDetectionView: View {
     @MainActor
     private func pauseDetectionFromUser() {
         cancelCountdown()
+
+        // 影片模式：暫停即自動產生並顯示分析摘要（先截資料再 teardown）。
+        if case .video = detectionSource, engineAttached {
+            if analysisPipeline.hasEvaluatedFrames {
+                summaryLines = buildSummaryLinesForHistory()
+            }
+            let fallbackQuality = videoQualityResult ?? livePrediction
+            pauseDetectionProcessing(fullReset: true, preserveAnalysis: true)
+            isPaused = true
+            quickPoseEngine.fpsText = "FPS: —（已暫停）"
+            quickPoseEngine.adviceLines = ["偵測已暫停，正在產生分析摘要…"]
+            quickPoseEngine.statusHint = ""
+            runQualityAnalysisAfterCapture(fallback: fallbackQuality)
+            return
+        }
+
         if engineAttached {
             summaryLines = buildSummaryLinesForHistory()
             autoSaveSummaryToHistory()
@@ -1392,6 +1503,35 @@ struct PoseDetectionView: View {
             quickPoseEngine.adviceLines = ["偵測已暫停，摘要已存入歷史紀錄。"] + PauseAdvice.lines
         }
         quickPoseEngine.statusHint = ""
+    }
+
+    /// 使用暫停前已截下的影格做品質辨識，並打開摘要 sheet。
+    @MainActor
+    private func runQualityAnalysisAfterCapture(fallback: LivePrediction?) {
+        videoQualityResult = nil
+        isAnalyzingVideoQuality = true
+        showSummary = true
+
+        let wireFrames = cachedSessionFrames
+        let sessionID = lastAnalyzableSessionID
+
+        Task {
+            var result: LivePrediction?
+            if !wireFrames.isEmpty {
+                result = await stream.predict(frames: wireFrames)
+            } else if let sessionID {
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                let records = database.allFrames(sessionID: sessionID)
+                result = await stream.predict(frames: records)
+            } else {
+                result = fallback
+                    ?? LivePrediction(label: nil, probabilityGood: 0, note: "尚無節點資料")
+            }
+            await MainActor.run {
+                applyVideoQualityResult(result, fallback: fallback)
+                quickPoseEngine.adviceLines = ["偵測已暫停，摘要已存入歷史紀錄。"] + PauseAdvice.lines
+            }
+        }
     }
 
     @MainActor
@@ -1414,6 +1554,7 @@ struct PoseDetectionView: View {
         historySavedForSession = false
         lastSavedID = nil
         quickPoseEngine.dbNodeCount = 0
+        cachedSessionFrames = []
         dbSessionID = database.beginSession(sourceLabel: currentSourceLabel)
         startStreaming()
 
@@ -1504,7 +1645,7 @@ private struct VideoSummarySheet: View {
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                    Text("註：分析完成後會自動寫入歷史紀錄；可在影片繼續播放後再開啟，數值會更完整。")
+                    Text("註：按「暫停」會自動產生摘要；播放中也可按「品質辨識與摘要」。影片播得越完整，數值通常越準。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .padding(.top, 6)
@@ -1604,7 +1745,7 @@ private struct SummaryHistorySheet: View {
                         Text("還沒有任何歷史紀錄")
                             .font(.body)
                             .foregroundStyle(.secondary)
-                        Text("完成影片品質辨識，或相機偵測後按「暫停」，摘要會自動存入這裡。")
+                        Text("影片偵測按「暫停」會自動產生摘要；相機偵測暫停後也會存入這裡。")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)

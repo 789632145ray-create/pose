@@ -65,9 +65,12 @@ final class PoseStreamClient {
     private var frameIndex = 0
     private var pending: [WireFrame] = []   // 待上傳
     private var window: [WireFrame] = []    // 最近視窗（供預測）
+    /// 本次偵測累積的全部影格（供暫停後品質辨識；不受 window 截斷）。
+    private var sessionFrames: [WireFrame] = []
 
     private let batchMaxPending = 600        // 離線時上限，避免無限增長
     private let windowSize = 30
+    private let sessionFramesMax = 2_400
 
     // MARK: Wire 模型（對應後端 PoseFrame / PoseNode）
 
@@ -145,6 +148,16 @@ final class PoseStreamClient {
 
         window.append(frame)
         if window.count > windowSize { window.removeFirst(window.count - windowSize) }
+
+        sessionFrames.append(frame)
+        if sessionFrames.count > sessionFramesMax {
+            sessionFrames.removeFirst(sessionFrames.count - sessionFramesMax)
+        }
+    }
+
+    /// 取出本次偵測累積影格（暫停／結束串流前呼叫，避免 reset 後遺失）。
+    func snapshotSessionFrames() -> [WireFrame] {
+        sessionFrames
     }
 
     /// 批次上傳暫存的幀。
@@ -329,6 +342,7 @@ final class PoseStreamClient {
         frameIndex = 0
         pending.removeAll(keepingCapacity: true)
         window.removeAll(keepingCapacity: true)
+        sessionFrames.removeAll(keepingCapacity: true)
     }
 
     @discardableResult

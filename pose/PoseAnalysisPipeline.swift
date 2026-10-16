@@ -293,6 +293,8 @@ final class PoseAnalysisPipeline {
     var totalSteps: Int { stepDetector.totalSteps }
     var leftSteps: Int { stepDetector.leftSteps }
     var rightSteps: Int { stepDetector.rightSteps }
+    /// 本 session 是否已累積過有效姿勢幀（暫停後 reset 前用來判斷可否產生摘要）。
+    var hasEvaluatedFrames: Bool { totalEvaluatedFrames > 0 }
     var avgCadenceBPM: Double? {
         let bpms = stepDetector.recentEvents.compactMap { $0.cadenceBPM }
         guard !bpms.isEmpty else { return nil }
