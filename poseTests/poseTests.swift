@@ -10,27 +10,61 @@ import XCTest
 
 final class poseTests: XCTestCase {
 
-    override func setUpWithError() throws {
-        // Put setup code here. This method is called before the invocation of each test method in the class.
+    func testGaitStatsParsedFromSummaryLines() throws {
+        let lines = [
+            "模型辨識：姿勢「好」（信心 95%）",
+            "總步數：24（左 13 / 右 11）",
+            "平均步頻：120 bpm",
+            "個人化評估：青壯年（22 歲）",
+            "左右平衡：左 54% / 右 46%"
+        ]
+
+        let stats = try XCTUnwrap(SavedSummary.gaitStats(from: lines))
+        XCTAssertEqual(stats.totalSteps, 24)
+        XCTAssertEqual(stats.leftSteps, 13)
+        XCTAssertEqual(stats.rightSteps, 11)
+        XCTAssertEqual(stats.avgCadenceBPM, 120)
     }
 
-    override func tearDownWithError() throws {
-        // Put teardown code here. This method is called after the invocation of each test method in the class.
+    func testDisplayStepsFallbackWhenStoredFieldsAreZero() {
+        let summary = SavedSummary(
+            id: UUID(),
+            date: Date(),
+            sourceLabel: "影片：demo.mov",
+            totalSteps: 0,
+            leftSteps: 0,
+            rightSteps: 0,
+            avgCadenceBPM: nil,
+            lines: [
+                "總步數：24（左 13 / 右 11）",
+                "平均步頻：120 bpm"
+            ]
+        )
+
+        XCTAssertEqual(summary.displayTotalSteps, 24)
+        XCTAssertEqual(summary.displayLeftSteps, 13)
+        XCTAssertEqual(summary.displayRightSteps, 11)
+        XCTAssertEqual(summary.displayAvgCadenceBPM, 120)
     }
 
-    func testExample() throws {
-        // This is an example of a functional test case.
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
-        // Any test you write for XCTest can be annotated as throws and async.
-        // Mark your test throws to produce an unexpected failure when your test encounters an uncaught error.
-        // Mark your test async to allow awaiting for asynchronous code to complete. Check the results with assertions afterwards.
-    }
+    func testDisplayStepsPreferStoredFields() {
+        let summary = SavedSummary(
+            id: UUID(),
+            date: Date(),
+            sourceLabel: "相機（即時）",
+            totalSteps: 48,
+            leftSteps: 22,
+            rightSteps: 26,
+            avgCadenceBPM: 125,
+            lines: [
+                "總步數：24（左 13 / 右 11）",
+                "平均步頻：120 bpm"
+            ]
+        )
 
-    func testPerformanceExample() throws {
-        // This is an example of a performance test case.
-        self.measure {
-            // Put the code you want to measure the time of here.
-        }
+        XCTAssertEqual(summary.displayTotalSteps, 48)
+        XCTAssertEqual(summary.displayLeftSteps, 22)
+        XCTAssertEqual(summary.displayRightSteps, 26)
+        XCTAssertEqual(summary.displayAvgCadenceBPM, 125)
     }
-
 }

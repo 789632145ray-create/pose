@@ -293,6 +293,8 @@ struct PoseDetectionView: View {
     @State private var isLoadingVideo = false
     @State private var showSummary = false
     @State private var summaryLines: [String] = []
+    /// 產生摘要當下的步態統計快照；pipeline reset 後仍供歷史寫入。
+    @State private var summaryGaitSnapshot: GaitStatsSnapshot?
     @State private var videoLoadError: String?
     @State private var pendingVideo: PendingVideo?
     @State private var showHistory = false
@@ -307,7 +309,16 @@ struct PoseDetectionView: View {
     private let database = PoseDatabase.shared
     /// 目前進行中的資料庫 session id（nil 代表沒有進行中的 session）。
     @State private var dbSessionID: String?
+    /// 最近一次已結束、仍可供摘要回填步數的 session。
+    @State private var lastAnalyzableSessionID: String?
     @State private var showDatabase = false
+
+    private struct GaitStatsSnapshot {
+        var totalSteps: Int
+        var leftSteps: Int
+        var rightSteps: Int
+        var avgCadenceBPM: Double?
+    }
 
     /// 每幀即時串流上傳 + 即時預測。
     private let stream = PoseStreamClient()
@@ -450,6 +461,10 @@ struct PoseDetectionView: View {
             }
             .onDisappear {
                 cancelCountdown()
+                // sheet／離開畫面可能先 reset pipeline；先留下步數快照供非同步摘要寫入。
+                if analysisPipeline.hasEvaluatedFrames {
+                    captureSummaryGaitSnapshot()
+                }
                 quickPoseEngine.detectionActive = false
                 quickPoseEngine.stopLoop()
                 finishDatabaseSession()
@@ -847,6 +862,9 @@ struct PoseDetectionView: View {
             resetStepUIState()
             livePrediction = nil
             videoQualityResult = nil
+            lastAnalyzableSessionID = nil
+            summaryGaitSnapshot = nil
+            summaryLines = []
         }
     }
 
@@ -891,8 +909,32 @@ struct PoseDetectionView: View {
     }
 
     @MainActor
+    private func captureSummaryGaitSnapshot() {
+        if analysisPipeline.hasEvaluatedFrames {
+            summaryGaitSnapshot = GaitStatsSnapshot(
+                totalSteps: analysisPipeline.totalSteps,
+                leftSteps: analysisPipeline.leftSteps,
+                rightSteps: analysisPipeline.rightSteps,
+                avgCadenceBPM: analysisPipeline.avgCadenceBPM
+            )
+            return
+        }
+        if let parsed = SavedSummary.gaitStats(from: summaryLines) {
+            summaryGaitSnapshot = GaitStatsSnapshot(
+                totalSteps: parsed.totalSteps,
+                leftSteps: parsed.leftSteps,
+                rightSteps: parsed.rightSteps,
+                avgCadenceBPM: parsed.avgCadenceBPM
+            )
+        }
+    }
+
+    @MainActor
     private func buildSummaryLinesForHistory() -> [String] {
         var lines = analysisPipeline.videoSummary()
+        if analysisPipeline.hasEvaluatedFrames {
+            captureSummaryGaitSnapshot()
+        }
         if let pred = videoQualityResult ?? livePrediction,
            pred.note == nil,
            let label = pred.label {
@@ -905,20 +947,88 @@ struct PoseDetectionView: View {
         return lines
     }
 
-    /// 偵測／分析完成後自動寫入歷史紀錄（同一 session 只存一次）。
+    /// 彙整寫入歷史用的步態統計：即時 pipeline → 摘要快照 → 文案解析 → 已存／已結束 session。
+    @MainActor
+    private func resolvedGaitStatsForHistory(lines: [String]) -> GaitStatsSnapshot {
+        let existing = lastSavedID.flatMap { id in summaryStore.items.first(where: { $0.id == id }) }
+        let ended = lastAnalyzableSessionID.flatMap { id in database.sessions().first(where: { $0.id == id }) }
+        let parsed = SavedSummary.gaitStats(from: lines)
+
+        let total = [
+            analysisPipeline.totalSteps,
+            summaryGaitSnapshot?.totalSteps ?? 0,
+            parsed?.totalSteps ?? 0,
+            existing?.totalSteps ?? 0,
+            ended?.totalSteps ?? 0
+        ].max() ?? 0
+
+        let left: Int
+        let right: Int
+        if analysisPipeline.totalSteps > 0 {
+            left = analysisPipeline.leftSteps
+            right = analysisPipeline.rightSteps
+        } else if let snap = summaryGaitSnapshot, snap.totalSteps > 0 {
+            left = snap.leftSteps
+            right = snap.rightSteps
+        } else if let parsed, parsed.totalSteps > 0 {
+            left = parsed.leftSteps
+            right = parsed.rightSteps
+        } else if let existing, existing.totalSteps > 0 {
+            left = existing.leftSteps
+            right = existing.rightSteps
+        } else {
+            left = ended?.leftSteps ?? 0
+            right = ended?.rightSteps ?? 0
+        }
+
+        let cadence = analysisPipeline.avgCadenceBPM
+            ?? summaryGaitSnapshot?.avgCadenceBPM
+            ?? parsed?.avgCadenceBPM
+            ?? existing?.avgCadenceBPM
+            ?? ended?.avgCadenceBPM
+
+        return GaitStatsSnapshot(
+            totalSteps: total,
+            leftSteps: left,
+            rightSteps: right,
+            avgCadenceBPM: cadence
+        )
+    }
+
+    /// 偵測／分析完成後自動寫入歷史紀錄（同一 session 只存一次；品質辨識補齊後可更新同一筆）。
     @MainActor
     private func autoSaveSummaryToHistory() {
-        guard !historySavedForSession else { return }
         let lines = summaryLines.isEmpty ? buildSummaryLinesForHistory() : summaryLines
         guard !lines.isEmpty else { return }
+
+        let gait = resolvedGaitStatsForHistory(lines: lines)
+        summaryGaitSnapshot = gait
+
+        if historySavedForSession, let existingID = lastSavedID {
+            let existing = summaryStore.items.first(where: { $0.id == existingID })
+            summaryStore.add(
+                SavedSummary(
+                    id: existingID,
+                    date: existing?.date ?? Date(),
+                    sourceLabel: currentSourceLabel,
+                    totalSteps: gait.totalSteps,
+                    leftSteps: gait.leftSteps,
+                    rightSteps: gait.rightSteps,
+                    avgCadenceBPM: gait.avgCadenceBPM,
+                    lines: lines
+                )
+            )
+            return
+        }
+
         let summary = SavedSummary(
             id: UUID(),
             date: Date(),
             sourceLabel: currentSourceLabel,
-            totalSteps: analysisPipeline.totalSteps,
-            leftSteps: analysisPipeline.leftSteps,
-            rightSteps: analysisPipeline.rightSteps,
-            avgCadenceBPM: analysisPipeline.avgCadenceBPM,
+            totalSteps: gait.totalSteps,
+            leftSteps: gait.leftSteps,
+            rightSteps: gait.rightSteps,
+            avgCadenceBPM: gait.avgCadenceBPM,
             lines: lines
         )
         summaryStore.add(summary)
@@ -934,7 +1044,8 @@ struct PoseDetectionView: View {
     /// 結束目前資料庫 session，把最終步態統計一併寫入。
     @MainActor
     private func finishDatabaseSession() {
-        guard dbSessionID != nil else { return }
+        guard let id = dbSessionID else { return }
+        lastAnalyzableSessionID = id
         database.endSession(
             totalSteps: analysisPipeline.totalSteps,
             leftSteps: analysisPipeline.leftSteps,
@@ -1073,12 +1184,21 @@ struct PoseDetectionView: View {
 
     @MainActor
     private func analyzeVideoQualityAndShowSummary() {
-        summaryLines = analysisPipeline.videoSummary()
+        // 僅在仍有評估幀時覆寫摘要；暫停後 pipeline 已 reset，不可用空摘要蓋掉既有文案。
+        if analysisPipeline.hasEvaluatedFrames {
+            summaryLines = analysisPipeline.videoSummary()
+            captureSummaryGaitSnapshot()
+        } else if summaryLines.isEmpty {
+            summaryLines = analysisPipeline.videoSummary()
+        } else {
+            captureSummaryGaitSnapshot()
+        }
+
         videoQualityResult = nil
         isAnalyzingVideoQuality = true
         showSummary = true
 
-        let sessionID = dbSessionID
+        let sessionID = dbSessionID ?? lastAnalyzableSessionID
         Task {
             let frames = sessionID.map { database.allFrames(sessionID: $0) } ?? []
             let result = await stream.predict(frames: frames)
@@ -1088,9 +1208,8 @@ struct PoseDetectionView: View {
                 if let result, result.note == nil, let label = result.label {
                     let pct = Int(result.confidencePercent)
                     let qualityLine = "模型辨識：姿勢「\(label == "good" ? "好" : "壞")」（信心 \(pct)%）"
-                    if !summaryLines.contains(where: { $0.hasPrefix("模型辨識：") }) {
-                        summaryLines.insert(qualityLine, at: 0)
-                    }
+                    summaryLines.removeAll { $0.hasPrefix("模型辨識：") }
+                    summaryLines.insert(qualityLine, at: 0)
                 }
                 autoSaveSummaryToHistory()
             }
@@ -1381,7 +1500,12 @@ struct PoseDetectionView: View {
     private func pauseDetectionFromUser() {
         cancelCountdown()
         if engineAttached {
-            summaryLines = buildSummaryLinesForHistory()
+            // 先截摘要與步數快照，再 teardown／reset，避免歷史寫入讀到 0 步。
+            if analysisPipeline.hasEvaluatedFrames || summaryLines.isEmpty {
+                summaryLines = buildSummaryLinesForHistory()
+            } else {
+                captureSummaryGaitSnapshot()
+            }
             autoSaveSummaryToHistory()
         }
         pauseDetectionProcessing(fullReset: true)
@@ -1413,6 +1537,7 @@ struct PoseDetectionView: View {
 
         historySavedForSession = false
         lastSavedID = nil
+        summaryGaitSnapshot = nil
         quickPoseEngine.dbNodeCount = 0
         dbSessionID = database.beginSession(sourceLabel: currentSourceLabel)
         startStreaming()
@@ -1625,11 +1750,11 @@ private struct SummaryHistorySheet: View {
                                         .foregroundStyle(.secondary)
                                         .lineLimit(1)
                                     HStack(spacing: 12) {
-                                        Label("\(item.totalSteps) 步", systemImage: "figure.walk")
-                                        if let bpm = item.avgCadenceBPM {
+                                        Label("\(item.displayTotalSteps) 步", systemImage: "figure.walk")
+                                        if let bpm = item.displayAvgCadenceBPM {
                                             Label(String(format: "%.0f bpm", bpm), systemImage: "metronome")
                                         }
-                                        Label("L \(item.leftSteps) / R \(item.rightSteps)", systemImage: "arrow.left.arrow.right")
+                                        Label("L \(item.displayLeftSteps) / R \(item.displayRightSteps)", systemImage: "arrow.left.arrow.right")
                                     }
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
