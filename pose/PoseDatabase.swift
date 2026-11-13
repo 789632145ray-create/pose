@@ -184,10 +184,12 @@ final class PoseDatabase {
     func beginSession(sourceLabel: String) -> String {
         let id = UUID().uuidString
         let now = Date()
+        // 同步設定 activeSessionID，避免開 session 後前幾幀 recordFrame 因競態被丟棄。
         queue.sync { [weak self] in
-            guard let self, let realm = try? self.openRealm() else { return }
+            guard let self else { return }
             self.activeSessionID = id
             self.frameCounter = 0
+            guard let realm = try? self.openRealm() else { return }
             let session = RLMPoseSession()
             session.id = id
             session.startedAt = now
