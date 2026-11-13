@@ -34,6 +34,8 @@ final class QuickPoseEngine: ObservableObject {
     private(set) var loopActive = false
     /// MediaPipe Full（`.good`）或自訓模型共用完整管線時由此指定模型。
     var assessmentEngine: PoseAssessmentEngine = .trainedModel
+    /// 自訓＋MediaPipe 模型或 MediaPipe 引擎時寫入 mediapipe.realm。
+    var prefersMediaPipeStore = false
     var activityMode: GaitActivityMode = .walking
     private var restartTask: Task<Void, Never>?
 
@@ -167,7 +169,8 @@ final class QuickPoseEngine: ObservableObject {
                 }
                 let advice = PoseFrameAdvice(lines: mergedLines, issues: mergedIssues)
                 let nodes = PoseNodeExtractor.extractAll(from: landmarks)
-                PoseDatabase.store(for: assessmentEngine).recordFrame(nodes: nodes)
+                let store: PoseDatabase = prefersMediaPipeStore ? .mediaPipe : .shared
+                store.recordFrame(nodes: nodes)
                 let ts = Date().timeIntervalSince1970
                 let savedCount = nodes.count
                 let result = pipeline.process(
@@ -360,9 +363,9 @@ struct PoseDetectionView: View {
     @State private var historySavedForSession = false
     @StateObject private var summaryStore = SummaryStore()
 
-    /// 目前引擎對應的本機節點庫（MediaPipe 為獨立 mediapipe.realm）。
+    /// 目前應開啟的本機節點庫（MediaPipe 引擎或自訓＋MediaPipe 模型 → mediapipe.realm）。
     private var nodeDatabase: PoseDatabase {
-        PoseDatabase.store(for: assessmentEngine)
+        usesMediaPipeDataPlane ? .mediaPipe : .shared
     }
     /// 開始 session 時鎖定的庫，避免中途切引擎寫錯檔。
     @State private var sessionIsMediaPipe = false
@@ -395,6 +398,24 @@ struct PoseDetectionView: View {
 
     private var assessmentEngine: PoseAssessmentEngine {
         modeStore.engine
+    }
+
+    /// 自訓模型可再選骨架／品質模型族系：MediaPipe → mediapipe.realm + /mediapipe/predict。
+    private var usesMediaPipeTrainedPipeline: Bool {
+        assessmentEngine == .trainedModel && modeStore.skeletonModel == .mediaPipe
+    }
+
+    /// 寫入與預測要走 MediaPipe 管線（獨立引擎，或自訓＋MediaPipe 模型）。
+    private var usesMediaPipeDataPlane: Bool {
+        assessmentEngine == .mediaPipe || usesMediaPipeTrainedPipeline
+    }
+
+    private var activePredictPath: String {
+        usesMediaPipeDataPlane ? "/mediapipe/predict" : assessmentEngine.predictPath
+    }
+
+    private var activePredictEngineName: String {
+        usesMediaPipeDataPlane ? "mediapipe" : assessmentEngine.predictEngineName
     }
 
     /// 相機／影片來源切換時強制 remount，確保 onAppear → start 生命週期與原生模式一致。
@@ -510,6 +531,9 @@ struct PoseDetectionView: View {
             }
             .onChange(of: modeStore.engine) { _, newEngine in
                 handleAssessmentEngineChange(newEngine)
+            }
+            .onChange(of: modeStore.skeletonModel) { _, _ in
+                handleSkeletonModelChange()
             }
             .onChange(of: modeStore.activity) { _, _ in
                 syncActivityMode()
@@ -668,8 +692,10 @@ struct PoseDetectionView: View {
     private func bottomPanel(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             DetectionEnginePickerRow()
-            // 自訓模型／各引擎共用：可另選 QuickPose 或 MediaPipe 骨架。
-            SkeletonModelPickerRow()
+            // 僅「自訓模型」顯示：選 QuickPose 或 MediaPipe 的自訓品質模型／資料庫。
+            if assessmentEngine == .trainedModel {
+                SkeletonModelPickerRow()
+            }
             GaitActivityPickerRow()
             bottomControls
 
@@ -927,6 +953,7 @@ struct PoseDetectionView: View {
     @MainActor
     private func syncAssessmentEngine() {
         quickPoseEngine.assessmentEngine = assessmentEngine
+        quickPoseEngine.prefersMediaPipeStore = usesMediaPipeDataPlane
     }
 
     @MainActor
@@ -944,16 +971,36 @@ struct PoseDetectionView: View {
         livePrediction = nil
         videoQualityResult = nil
         finishDatabaseSession()
+        stopStreaming()
         if engineAttached, quickPoseEngine.detectionActive {
-            sessionIsMediaPipe = newEngine == .mediaPipe
+            sessionIsMediaPipe = usesMediaPipeDataPlane
             dbSessionID = nodeDatabase.beginSession(sourceLabel: currentSourceLabel)
             quickPoseEngine.dbNodeCount = 0
+            startStreaming()
         }
         if PoseAssessmentEngine.requiresPoseRuntimeRestart(from: previous, to: newEngine) {
             quickPoseEngine.scheduleRestart(hint: "正在切換\(newEngine.title)骨架…")
         } else {
             quickPoseEngine.statusHint = "已切換\(newEngine.title)，骨架持續顯示"
         }
+    }
+
+    /// 自訓模型下切換 QuickPose／MediaPipe 品質模型：換 Realm 與 /predict 路徑，不刪舊資料。
+    @MainActor
+    private func handleSkeletonModelChange() {
+        guard assessmentEngine == .trainedModel else { return }
+        syncAssessmentEngine()
+        livePrediction = nil
+        videoQualityResult = nil
+        finishDatabaseSession()
+        stopStreaming()
+        if engineAttached, quickPoseEngine.detectionActive {
+            sessionIsMediaPipe = usesMediaPipeDataPlane
+            dbSessionID = nodeDatabase.beginSession(sourceLabel: currentSourceLabel)
+            quickPoseEngine.dbNodeCount = 0
+            startStreaming()
+        }
+        quickPoseEngine.statusHint = "已切換\(modeStore.skeletonModel.title)，按「開始」寫入對應資料庫"
     }
 
     @MainActor
@@ -1140,8 +1187,8 @@ struct PoseDetectionView: View {
         guard assessmentEngine.usesQualityPredict else { return }
         let source = currentSourceLabel
         let uploadLiveFrames = assessmentEngine.usesTrainedModelPredict
-        stream.predictPath = assessmentEngine.predictPath
-        stream.predictEngine = assessmentEngine.predictEngineName
+        stream.predictPath = activePredictPath
+        stream.predictEngine = activePredictEngineName
         streamLoopTask?.cancel()
         streamLoopTask = Task {
             if uploadLiveFrames {
@@ -1283,8 +1330,8 @@ struct PoseDetectionView: View {
         }
 
         isAnalyzingVideoQuality = true
-        stream.predictPath = assessmentEngine.predictPath
-        stream.predictEngine = assessmentEngine.predictEngineName
+        stream.predictPath = activePredictPath
+        stream.predictEngine = activePredictEngineName
 
         let sessionID = dbSessionID
         Task {
@@ -1479,9 +1526,13 @@ struct PoseDetectionView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .center, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(assessmentEngine.hudBadgeTitle) · \(modeStore.skeletonModel.shortTitle)")
+                    Text(
+                        assessmentEngine == .trainedModel
+                            ? "\(assessmentEngine.hudBadgeTitle) · \(modeStore.skeletonModel.shortTitle)"
+                            : assessmentEngine.hudBadgeTitle
+                    )
                         .font(.caption.weight(.bold))
-                        .foregroundStyle(assessmentEngine == .mediaPipe ? .mint : .orange)
+                        .foregroundStyle(usesMediaPipeDataPlane ? .mint : .orange)
                     Text(modeStore.activity.coreTitle)
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(modeStore.activity == .running ? .orange : .cyan)
@@ -1505,7 +1556,7 @@ struct PoseDetectionView: View {
             Text("資料庫節點：\(quickPoseEngine.dbNodeCount)")
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.teal)
-            if assessmentEngine == .mediaPipe {
+            if usesMediaPipeDataPlane {
                 Text("寫入 \(MediaPipeRealm.fileName)")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.mint)
@@ -1670,7 +1721,7 @@ struct PoseDetectionView: View {
         historySavedForSession = false
         lastSavedID = nil
         quickPoseEngine.dbNodeCount = 0
-        sessionIsMediaPipe = assessmentEngine == .mediaPipe
+        sessionIsMediaPipe = usesMediaPipeDataPlane
         dbSessionID = nodeDatabase.beginSession(sourceLabel: currentSourceLabel)
         startStreaming()
 

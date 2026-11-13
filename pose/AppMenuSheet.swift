@@ -90,9 +90,9 @@ struct AppMenuSheet: View {
                 .foregroundStyle(.primary)
             }
         } header: {
-            Text("骨架模型（QuickPose／MediaPipe）")
+            Text("自訓模型：骨架／品質模型")
         } footer: {
-            Text("與偵測引擎分開：自訓模型也可選要用哪一種骨架。兩種都沿用 Full 骨架工作階段，不刪除本機節點資料庫。")
+            Text("只在「自訓模型」時使用。QuickPose 模型 → pose.realm + /predict；MediaPipe 模型 → mediapipe.realm + /mediapipe/predict。切換不會刪除既有節點資料。")
         }
     }
 
