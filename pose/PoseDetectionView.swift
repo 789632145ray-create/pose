@@ -665,19 +665,20 @@ struct PoseDetectionView: View {
         }
     }
 
-    /// 底部控制區與收合按鈕。收起後按鈕留在左下，方便再打開。
+    /// 底部控制區與收合按鈕。按鈕壓在控制區上緣正中；收起後仍留在畫面下方正中。
     @MainActor
     private func bottomChrome(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(spacing: isBottomPanelHidden ? 0 : -18) {
             bottomPanelToggle
-                .padding(.leading, 12)
-                .padding(.bottom, isBottomPanelHidden ? max(safeBottom, 8) : 0)
+                .zIndex(1)
 
             if !isBottomPanelHidden {
                 bottomPanel(height: panelHeight, safeBottom: safeBottom)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+        .frame(maxWidth: .infinity)
+        .padding(.bottom, isBottomPanelHidden ? max(safeBottom, 8) : 0)
         .animation(.easeInOut(duration: 0.25), value: isBottomPanelHidden)
     }
 
