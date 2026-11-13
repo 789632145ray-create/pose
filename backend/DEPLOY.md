@@ -48,8 +48,8 @@ Railway **只跑後端 API**，專案列表不會出現 iOS App（App 用 Xcode 
 1. 到 [Railway](https://railway.app) 用 **同一個 GitHub** 登入
 2. **New Project** → **Deploy from GitHub repo** → 選 **`789632145ray-create/pose`**
 3. 若沒看到 repo：Account Settings → GitHub → 勾選 `pose`
-4. Branch 選 **`cursor/add-runpose-backend-dd14`**（合併進 `main` 後再改 `main`）
-5. **Root Directory 留空**（根目錄 `Dockerfile` 會去抓 `backend/`）
+4. Branch 選含 MediaPipe 模型的分支（目前可用 **`cursor/restore-skeleton-model-picker-b192`**；合併進 `main` 後再改 `main`）
+5. **Root Directory 留空**（根目錄 `Dockerfile` 會複製 `backend/` 的程式與兩個 `.joblib`）
 6. **Variables** 新增：
 
    | 變數 | 值 |

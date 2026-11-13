@@ -15,7 +15,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
-COPY main.py train.py mongo_util.py pose_quality_model.joblib ./
+COPY main.py train.py mongo_util.py \
+    pose_quality_model.joblib \
+    mediapipe_quality_model.joblib \
+    ./
 
 ENV POSE_RELOAD=0
 

@@ -1,7 +1,7 @@
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
-watchPatterns = ["backend/**/*.py", "backend/requirements.txt", "Dockerfile"]
+watchPatterns = ["backend/**/*.py", "backend/**/*.joblib", "backend/requirements.txt", "Dockerfile"]
 
 [deploy]
 healthcheckPath = "/"

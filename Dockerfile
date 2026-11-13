@@ -14,7 +14,10 @@ COPY backend/requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
-COPY backend/main.py backend/train.py backend/mongo_util.py backend/pose_quality_model.joblib ./
+COPY backend/main.py backend/train.py backend/mongo_util.py \
+    backend/pose_quality_model.joblib \
+    backend/mediapipe_quality_model.joblib \
+    ./
 
 ENV POSE_RELOAD=0
 
