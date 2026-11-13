@@ -358,6 +358,8 @@ struct PoseDetectionView: View {
     @State private var showHistory = false
     @State private var showMemberProfile = false
     @State private var showAppMenu = false
+    /// 底部控制區可收起，讓骨架畫面不被擋住。
+    @State private var isBottomPanelHidden = false
     @State private var lastSavedID: UUID?
     /// 本次偵測 session 是否已自動寫入歷史（避免重複儲存）。
     @State private var historySavedForSession = false
@@ -1423,12 +1425,52 @@ struct PoseDetectionView: View {
                     poseHUDOverlay(safeTop: geometry.safeAreaInsets.top)
                 }
                 .overlay(alignment: .bottom) {
-                    bottomPanel(height: bottomPanelHeight, safeBottom: geometry.safeAreaInsets.bottom)
+                    bottomChrome(height: bottomPanelHeight, safeBottom: geometry.safeAreaInsets.bottom)
                 }
                 .overlay(alignment: .bottomTrailing) {
                     quickPoseVersionLabel
+                        .padding(.bottom, isBottomPanelHidden ? 36 : 0)
                 }
         }
+    }
+
+    /// 底部控制區與收合按鈕。按鈕壓在控制區上緣正中；收起後仍留在畫面下方正中。
+    @MainActor
+    private func bottomChrome(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
+        VStack(spacing: isBottomPanelHidden ? 0 : -18) {
+            bottomPanelToggle
+                .zIndex(1)
+
+            if !isBottomPanelHidden {
+                bottomPanel(height: panelHeight, safeBottom: safeBottom)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.bottom, isBottomPanelHidden ? max(safeBottom, 8) : 0)
+        .animation(.easeInOut(duration: 0.25), value: isBottomPanelHidden)
+    }
+
+    @MainActor
+    private var bottomPanelToggle: some View {
+        Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            withAnimation(.easeInOut(duration: 0.25)) {
+                isBottomPanelHidden.toggle()
+            }
+        } label: {
+            Label(
+                isBottomPanelHidden ? "顯示控制" : "隱藏",
+                systemImage: isBottomPanelHidden ? "chevron.up" : "chevron.down"
+            )
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.black.opacity(0.72), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isBottomPanelHidden ? "顯示下方控制" : "隱藏下方控制")
     }
 
     private func cameraBottomPanelHeight(for height: CGFloat) -> CGFloat {
