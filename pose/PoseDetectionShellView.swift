@@ -8,10 +8,33 @@
 import Combine
 import SwiftUI
 
+/// 骨架模型，和上面的偵測引擎分開。QuickPose 較輕、影格較密；MediaPipe 是 BlazePose Full。
+enum PoseSkeletonModel: String, CaseIterable, Identifiable {
+    case quickPose = "quickpose"
+    case mediaPipe = "mediapipe"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .quickPose: return "QuickPose 模型"
+        case .mediaPipe: return "MediaPipe 模型"
+        }
+    }
+
+    var shortTitle: String {
+        switch self {
+        case .quickPose: return "QuickPose"
+        case .mediaPipe: return "MediaPipe"
+        }
+    }
+}
+
 @MainActor
 final class DetectionModeStore: ObservableObject {
     @AppStorage("poseDetectionEngine") private var engineRaw = PoseAssessmentEngine.trainedModel.rawValue
     @AppStorage("poseGaitActivity") private var activityRaw = GaitActivityMode.walking.rawValue
+    @AppStorage("poseSkeletonModel") private var skeletonRaw = PoseSkeletonModel.mediaPipe.rawValue
 
     var engine: PoseAssessmentEngine {
         get { PoseAssessmentEngine.resolved(fromStored: engineRaw) }
@@ -26,6 +49,14 @@ final class DetectionModeStore: ObservableObject {
         get { GaitActivityMode.resolved(fromStored: activityRaw) }
         set {
             activityRaw = newValue.rawValue
+            objectWillChange.send()
+        }
+    }
+
+    var skeletonModel: PoseSkeletonModel {
+        get { PoseSkeletonModel(rawValue: skeletonRaw) ?? .mediaPipe }
+        set {
+            skeletonRaw = newValue.rawValue
             objectWillChange.send()
         }
     }
@@ -93,7 +124,7 @@ private struct EngineChooserSheet: View {
                 } header: {
                     Text("請選擇偵測引擎")
                 } footer: {
-                    Text("三種引擎都可相機／上傳影片，並把節點標好／壞上傳。MediaPipe 存 mediapipe.realm，QuickPose 與自訓模型存 pose.realm。")
+                    Text("三種引擎都可相機／上傳影片，並把節點標好／壞上傳。自訓模型可再選 QuickPose／MediaPipe 骨架；MediaPipe 引擎寫入 mediapipe.realm，其餘寫入 pose.realm。")
                 }
             }
             .navigationTitle("偵測引擎")
@@ -149,6 +180,37 @@ struct DetectionEnginePickerRow: View {
         case .quickPose: return .cyan
         case .mediaPipe: return .mint
         case .trainedModel: return .indigo
+        }
+    }
+}
+
+struct SkeletonModelPickerRow: View {
+    @EnvironmentObject private var modeStore: DetectionModeStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("骨架模型")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.75))
+            HStack(spacing: 6) {
+                ForEach(PoseSkeletonModel.allCases) { model in
+                    let selected = modeStore.skeletonModel == model
+                    Button {
+                        modeStore.skeletonModel = model
+                    } label: {
+                        Text(model.title)
+                            .font(.caption.weight(.bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(selected ? (model == .mediaPipe ? .indigo : .cyan) : .gray)
+                    .accessibilityLabel(model.title)
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                }
+            }
         }
     }
 }

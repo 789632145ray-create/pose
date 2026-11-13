@@ -22,6 +22,7 @@ struct AppMenuSheet: View {
                 accountSection
                 actionsSection
                 engineSection
+                skeletonSection
                 signOutSection
             }
             .navigationTitle("選單")
@@ -68,6 +69,30 @@ struct AppMenuSheet: View {
             Text("偵測引擎（3 種）")
         } footer: {
             Text("QuickPose 為官方 overlay；MediaPipe 為 BlazePose Full 骨架；自訓模型會連雲端辨識。")
+        }
+    }
+
+    private var skeletonSection: some View {
+        Section {
+            ForEach(PoseSkeletonModel.allCases) { model in
+                Button {
+                    modeStore.skeletonModel = model
+                } label: {
+                    HStack {
+                        Text(model.title)
+                        Spacer()
+                        if modeStore.skeletonModel == model {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(Color.accentColor)
+                        }
+                    }
+                }
+                .foregroundStyle(.primary)
+            }
+        } header: {
+            Text("骨架模型（QuickPose／MediaPipe）")
+        } footer: {
+            Text("與偵測引擎分開：自訓模型也可選要用哪一種骨架。兩種都沿用 Full 骨架工作階段，不刪除本機節點資料庫。")
         }
     }
 

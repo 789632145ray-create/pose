@@ -67,7 +67,7 @@ final class QuickPoseEngine: ObservableObject {
         }
     }
 
-    /// MediaPipe 使用 BlazePose Full（`.good`）；自訓模型同樣用 Full 骨架再送後端。
+    /// 骨架列上的 QuickPose／MediaPipe 都沿用 Full（`.good`）工作階段，啟動後不重新載入輕量模型。
     func startLoopIfNeeded() {
         guard !loopActive else { return }
         loopActive = true
@@ -668,6 +668,8 @@ struct PoseDetectionView: View {
     private func bottomPanel(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             DetectionEnginePickerRow()
+            // 自訓模型／各引擎共用：可另選 QuickPose 或 MediaPipe 骨架。
+            SkeletonModelPickerRow()
             GaitActivityPickerRow()
             bottomControls
 
@@ -1389,7 +1391,8 @@ struct PoseDetectionView: View {
             case .liveCamera: return 0.46
             }
         }()
-        return min(max(height * ratio, 370), 500)
+        // 多一列「骨架模型」切換，略提高下限以免控制列被裁切。
+        return min(max(height * ratio, 410), 520)
     }
 
     @ViewBuilder
@@ -1476,7 +1479,7 @@ struct PoseDetectionView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .center, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(assessmentEngine.hudBadgeTitle)
+                    Text("\(assessmentEngine.hudBadgeTitle) · \(modeStore.skeletonModel.shortTitle)")
                         .font(.caption.weight(.bold))
                         .foregroundStyle(assessmentEngine == .mediaPipe ? .mint : .orange)
                     Text(modeStore.activity.coreTitle)
