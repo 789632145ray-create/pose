@@ -23,6 +23,103 @@ private enum PauseAdvice {
     ]
 }
 
+/// 相機回呼可能不在主執行緒。只留最新一幀，並在處理完才排下一次，
+/// 讓暫停按鈕能插進主執行緒，不會排在整段影格後面。
+private final class LatestFrameBuffer: @unchecked Sendable {
+    struct Item {
+        var status: QuickPose.Status
+        var image: UIImage?
+        var landmarks: QuickPose.Landmarks?
+    }
+
+    private let lock = NSLock()
+    private var generation = 0
+    private var stopped = true
+    private var scheduled = false
+    private var pending: Item?
+
+    @discardableResult
+    func reset() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        generation += 1
+        stopped = false
+        pending = nil
+        return generation
+    }
+
+    func stop() {
+        lock.lock()
+        generation += 1
+        stopped = true
+        pending = nil
+        lock.unlock()
+    }
+
+    func push(generation: Int, status: QuickPose.Status, image: UIImage?, landmarks: QuickPose.Landmarks?) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !stopped, generation == self.generation else { return false }
+        pending = Item(status: status, image: image, landmarks: landmarks)
+        if scheduled { return false }
+        scheduled = true
+        return true
+    }
+
+    func pop() -> Item? {
+        lock.lock()
+        defer { lock.unlock() }
+        if stopped {
+            pending = nil
+            scheduled = false
+            return nil
+        }
+        let item = pending
+        pending = nil
+        if item == nil {
+            scheduled = false
+        }
+        return item
+    }
+
+    func shouldScheduleFollowUp() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if stopped || pending == nil {
+            scheduled = false
+            return false
+        }
+        return true
+    }
+}
+
+/// start / stop 可能先後排進背景佇列，用這個旗標讓較晚的 stop 取消還沒執行的 start。
+private final class EngineRunState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var wantsRunning = false
+
+    /// 若已經要運轉，回傳 false。
+    func beginStart() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if wantsRunning { return false }
+        wantsRunning = true
+        return true
+    }
+
+    func requestStop() {
+        lock.lock()
+        wantsRunning = false
+        lock.unlock()
+    }
+
+    func shouldStart() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return wantsRunning
+    }
+}
+
 /// QuickPose 引擎 + 影格處理（class 持有狀態，避免 onFrame 閉包捕獲 struct 導致永遠讀到舊的 detectionActive）。
 @MainActor
 final class QuickPoseEngine: ObservableObject {
@@ -46,27 +143,60 @@ final class QuickPoseEngine: ObservableObject {
     @Published var recentSteps: [StepEvent] = []
     @Published private(set) var frameCallbackCount = 0
 
+    /// 只保留最新一幀給主執行緒，避免暫停按鈕排在整段影格更新後面。
+    nonisolated private let frames = LatestFrameBuffer()
+    /// start / stop 串在同一條佇列。暫停時不在主執行緒呼叫 pose.stop()，否則按鈕要等引擎收尾。
+    nonisolated private let engineQueue = DispatchQueue(label: "ai.pose.quickpose.engine")
+    nonisolated private let runState = EngineRunState()
+
     init() {
         let raw = (Bundle.main.object(forInfoDictionaryKey: "QuickPoseSDKKey") as? String) ?? ""
         pose = QuickPose(sdkKey: raw.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     func stopLoop() {
-        if loopActive {
+        frames.stop()
+        runState.requestStop()
+        loopActive = false
+        let pose = pose
+        engineQueue.async {
             pose.stop()
-            loopActive = false
         }
     }
 
     /// 對齊原生模式：僅在尚未運轉時 start（不用 modelConfig，與 BasicQuickPoseRunner 相同）。
     func startLoopIfNeeded() {
-        guard !loopActive else { return }
+        guard runState.beginStart() else { return }
+        let generation = frames.reset()
         loopActive = true
-
-        pose.start(features: [.overlay(.wholeBody)]) { [weak self] status, image, _, _, landmarks in
-            Task { @MainActor in
-                self?.processFrame(status: status, image: image, landmarks: landmarks)
+        let pose = pose
+        engineQueue.async { [weak self, frames, runState] in
+            guard runState.shouldStart() else {
+                Task { @MainActor [weak self] in
+                    guard let self, !self.runState.shouldStart() else { return }
+                    self.loopActive = false
+                }
+                return
             }
+            pose.start(features: [.overlay(.wholeBody)]) { [weak self] status, image, _, _, landmarks in
+                guard frames.push(generation: generation, status: status, image: image, landmarks: landmarks) else { return }
+                Task { @MainActor [weak self] in
+                    self?.drainFrame()
+                }
+            }
+        }
+    }
+
+    private func drainFrame() {
+        guard detectionActive else {
+            _ = frames.pop()
+            return
+        }
+        guard let next = frames.pop() else { return }
+        processFrame(status: next.status, image: next.image, landmarks: next.landmarks)
+        guard detectionActive, frames.shouldScheduleFollowUp() else { return }
+        Task { @MainActor [weak self] in
+            self?.drainFrame()
         }
     }
 
@@ -77,8 +207,6 @@ final class QuickPoseEngine: ObservableObject {
     }
 
     func processFrame(status: QuickPose.Status, image: UIImage?, landmarks: QuickPose.Landmarks?) {
-        frameCallbackCount += 1
-
         switch status {
         case .sdkValidationError:
             detectionActive = false
@@ -95,6 +223,7 @@ final class QuickPoseEngine: ObservableObject {
         }
 
         guard detectionActive else { return }
+        frameCallbackCount += 1
 
         let img = image
         switch status {
@@ -838,6 +967,7 @@ struct PoseDetectionView: View {
     private func stopDetectionActivity(fullReset: Bool) {
         cancelCountdown()
         quickPoseEngine.detectionActive = false
+        quickPoseEngine.stopLoop()
         finishDatabaseSession()
         stopStreaming()
         engineAttached = false
@@ -847,24 +977,6 @@ struct PoseDetectionView: View {
             resetStepUIState()
             livePrediction = nil
             videoQualityResult = nil
-        }
-    }
-
-    /// 使用者暫停：只停資料寫入，QuickPose 引擎保持運轉（官方 demo 僅 onDisappear 才 stop）。
-    @MainActor
-    private func pauseDetectionProcessing(fullReset: Bool) {
-        cancelCountdown()
-        quickPoseEngine.detectionActive = false
-        finishDatabaseSession()
-        stopStreaming()
-        quickPoseEngine.isEngineStarting = false
-        quickPoseEngine.overlayImage = nil
-        if fullReset {
-            analysisPipeline.reset()
-            resetStepUIState()
-            livePrediction = nil
-            videoQualityResult = nil
-            quickPoseEngine.dbNodeCount = 0
         }
     }
 
@@ -1382,16 +1494,30 @@ struct PoseDetectionView: View {
         cancelCountdown()
         if engineAttached {
             summaryLines = buildSummaryLinesForHistory()
-            autoSaveSummaryToHistory()
         }
-        pauseDetectionProcessing(fullReset: true)
+        quickPoseEngine.detectionActive = false
+        quickPoseEngine.stopLoop()
         isPaused = true
+        quickPoseEngine.isEngineStarting = false
+        quickPoseEngine.overlayImage = nil
         quickPoseEngine.fpsText = "FPS: —（已暫停）"
-        quickPoseEngine.adviceLines = PauseAdvice.lines
-        if historySavedForSession {
-            quickPoseEngine.adviceLines = ["偵測已暫停，摘要已存入歷史紀錄。"] + PauseAdvice.lines
-        }
         quickPoseEngine.statusHint = ""
+        quickPoseEngine.adviceLines = PauseAdvice.lines
+        DispatchQueue.main.async {
+            if self.engineAttached {
+                self.autoSaveSummaryToHistory()
+                if self.historySavedForSession {
+                    self.quickPoseEngine.adviceLines = ["偵測已暫停，摘要已存入歷史紀錄。"] + PauseAdvice.lines
+                }
+            }
+            self.finishDatabaseSession()
+            self.stopStreaming()
+            self.analysisPipeline.reset()
+            self.resetStepUIState()
+            self.livePrediction = nil
+            self.videoQualityResult = nil
+            self.quickPoseEngine.dbNodeCount = 0
+        }
     }
 
     @MainActor
