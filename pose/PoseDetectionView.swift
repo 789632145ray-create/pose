@@ -23,6 +23,76 @@ private enum PauseAdvice {
     ]
 }
 
+/// 相機回呼可能不在主執行緒。只留最新一幀，並在處理完才排下一次，
+/// 讓暫停按鈕能插進主執行緒，不會排在整段影格後面。
+private final class LatestFrameBuffer: @unchecked Sendable {
+    struct Item {
+        var status: QuickPose.Status
+        var image: UIImage?
+        var landmarks: QuickPose.Landmarks?
+    }
+
+    private let lock = NSLock()
+    private var generation = 0
+    private var stopped = true
+    private var scheduled = false
+    private var pending: Item?
+
+    @discardableResult
+    func reset() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        generation += 1
+        stopped = false
+        pending = nil
+        return generation
+    }
+
+    func stop() {
+        lock.lock()
+        generation += 1
+        stopped = true
+        pending = nil
+        lock.unlock()
+    }
+
+    func push(generation: Int, status: QuickPose.Status, image: UIImage?, landmarks: QuickPose.Landmarks?) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !stopped, generation == self.generation else { return false }
+        pending = Item(status: status, image: image, landmarks: landmarks)
+        if scheduled { return false }
+        scheduled = true
+        return true
+    }
+
+    func pop() -> Item? {
+        lock.lock()
+        defer { lock.unlock() }
+        if stopped {
+            pending = nil
+            scheduled = false
+            return nil
+        }
+        let item = pending
+        pending = nil
+        if item == nil {
+            scheduled = false
+        }
+        return item
+    }
+
+    func shouldScheduleFollowUp() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if stopped || pending == nil {
+            scheduled = false
+            return false
+        }
+        return true
+    }
+}
+
 /// QuickPose 引擎 + 影格處理（class 持有狀態，避免 onFrame 閉包捕獲 struct 導致永遠讀到舊的 detectionActive）。
 @MainActor
 final class QuickPoseEngine: ObservableObject {
@@ -46,12 +116,17 @@ final class QuickPoseEngine: ObservableObject {
     @Published var recentSteps: [StepEvent] = []
     @Published private(set) var frameCallbackCount = 0
 
+    /// 只保留最新一幀給主執行緒。QuickPose 影格比 MediaPipe 密，若每幀都排進 MainActor，
+    /// 暫停按鈕會排在整段積壓後面，看起來要等很久才結束。
+    nonisolated private let frames = LatestFrameBuffer()
+
     init() {
         let raw = (Bundle.main.object(forInfoDictionaryKey: "QuickPoseSDKKey") as? String) ?? ""
         pose = QuickPose(sdkKey: raw.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     func stopLoop() {
+        frames.stop()
         if loopActive {
             pose.stop()
             loopActive = false
@@ -61,11 +136,24 @@ final class QuickPoseEngine: ObservableObject {
     /// 對齊原生模式：僅在尚未運轉時 start（不用 modelConfig，與 BasicQuickPoseRunner 相同）。
     func startLoopIfNeeded() {
         guard !loopActive else { return }
+        let generation = frames.reset()
         loopActive = true
 
         pose.start(features: [.overlay(.wholeBody)]) { [weak self] status, image, _, _, landmarks in
-            Task { @MainActor in
-                self?.processFrame(status: status, image: image, landmarks: landmarks)
+            guard let self else { return }
+            guard self.frames.push(generation: generation, status: status, image: image, landmarks: landmarks) else { return }
+            Task { @MainActor [weak self] in
+                self?.drainFrame()
+            }
+        }
+    }
+
+    private func drainFrame() {
+        guard let next = frames.pop() else { return }
+        processFrame(status: next.status, image: next.image, landmarks: next.landmarks)
+        if frames.shouldScheduleFollowUp() {
+            Task { @MainActor [weak self] in
+                self?.drainFrame()
             }
         }
     }
@@ -77,8 +165,6 @@ final class QuickPoseEngine: ObservableObject {
     }
 
     func processFrame(status: QuickPose.Status, image: UIImage?, landmarks: QuickPose.Landmarks?) {
-        frameCallbackCount += 1
-
         switch status {
         case .sdkValidationError:
             detectionActive = false
@@ -95,6 +181,7 @@ final class QuickPoseEngine: ObservableObject {
         }
 
         guard detectionActive else { return }
+        frameCallbackCount += 1
 
         let img = image
         switch status {
@@ -838,6 +925,7 @@ struct PoseDetectionView: View {
     private func stopDetectionActivity(fullReset: Bool) {
         cancelCountdown()
         quickPoseEngine.detectionActive = false
+        quickPoseEngine.stopLoop()
         finishDatabaseSession()
         stopStreaming()
         engineAttached = false
@@ -850,11 +938,13 @@ struct PoseDetectionView: View {
         }
     }
 
-    /// 使用者暫停：只停資料寫入，QuickPose 引擎保持運轉（官方 demo 僅 onDisappear 才 stop）。
+    /// 使用者暫停：立刻停掉 QuickPose，並讓資料庫略過已排隊的舊影格。
+    /// 引擎若繼續跑，較高的影格率會把暫停卡在主執行緒與 Realm 寫入後面。
     @MainActor
     private func pauseDetectionProcessing(fullReset: Bool) {
         cancelCountdown()
         quickPoseEngine.detectionActive = false
+        quickPoseEngine.stopLoop()
         finishDatabaseSession()
         stopStreaming()
         quickPoseEngine.isEngineStarting = false

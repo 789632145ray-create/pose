@@ -100,9 +100,17 @@ final class PoseDatabase {
     static let shared = PoseDatabase()
 
     private let queue = DispatchQueue(label: "ai.pose.database", qos: .utility)
+    private let epochLock = NSLock()
+
+    /// 呼叫端（主執行緒）的 session 世代。結束時把 closedEpoch 設成這個值，
+    /// 已排進 queue 的舊影格寫入會直接略過，暫停不必等整段 Realm 佇列跑完。
+    private var sessionEpoch = 0
+    private var closedEpoch = -1
 
     /// 目前進行中的 session（僅在 queue 上存取）。
     private var activeSessionID: String?
+    private var activeEpoch = -1
+    private var sessionIDByEpoch: [Int: String] = [:]
     private var frameCounter: Int = 0
 
     let fileURL: URL
@@ -118,9 +126,12 @@ final class PoseDatabase {
     func beginSession(sourceLabel: String) -> String {
         let id = UUID().uuidString
         let now = Date()
+        let epoch = nextEpoch()
         queue.async { [weak self] in
             guard let self, let realm = try? PoseRealm.open() else { return }
+            self.sessionIDByEpoch[epoch] = id
             self.activeSessionID = id
+            self.activeEpoch = epoch
             self.frameCounter = 0
             let session = RLMPoseSession()
             session.id = id
@@ -135,9 +146,12 @@ final class PoseDatabase {
 
     func recordFrame(nodes: [PoseNode], timestamp: Date = Date()) {
         guard !nodes.isEmpty else { return }
+        let epoch = currentEpoch()
+        if isEpochClosed(epoch) { return }
         let ts = timestamp.timeIntervalSince1970
         queue.async { [weak self] in
-            guard let self, let sid = self.activeSessionID, let realm = try? PoseRealm.open() else { return }
+            guard let self, !self.isEpochClosed(epoch) else { return }
+            guard self.activeEpoch == epoch, let sid = self.activeSessionID, let realm = try? PoseRealm.open() else { return }
             let frame = self.frameCounter
             self.frameCounter += 1
 
@@ -164,9 +178,11 @@ final class PoseDatabase {
     }
 
     func endSession(totalSteps: Int, leftSteps: Int, rightSteps: Int, avgCadenceBPM: Double?) {
+        let epoch = currentEpoch()
+        closeEpoch(epoch)
         let now = Date()
         queue.async { [weak self] in
-            guard let self, let sid = self.activeSessionID, let realm = try? PoseRealm.open() else { return }
+            guard let self, let sid = self.sessionIDByEpoch.removeValue(forKey: epoch), let realm = try? PoseRealm.open() else { return }
             try? realm.write {
                 if let session = realm.object(ofType: RLMPoseSession.self, forPrimaryKey: sid) {
                     session.endedAt = now
@@ -176,9 +192,37 @@ final class PoseDatabase {
                     session.avgCadenceBPM = avgCadenceBPM
                 }
             }
-            self.activeSessionID = nil
-            self.frameCounter = 0
+            if self.activeSessionID == sid {
+                self.activeSessionID = nil
+                self.activeEpoch = -1
+                self.frameCounter = 0
+            }
         }
+    }
+
+    private func nextEpoch() -> Int {
+        epochLock.lock()
+        defer { epochLock.unlock() }
+        sessionEpoch += 1
+        return sessionEpoch
+    }
+
+    private func currentEpoch() -> Int {
+        epochLock.lock()
+        defer { epochLock.unlock() }
+        return sessionEpoch
+    }
+
+    private func closeEpoch(_ epoch: Int) {
+        epochLock.lock()
+        closedEpoch = epoch
+        epochLock.unlock()
+    }
+
+    private func isEpochClosed(_ epoch: Int) -> Bool {
+        epochLock.lock()
+        defer { epochLock.unlock() }
+        return closedEpoch == epoch
     }
 
     // MARK: 查詢
@@ -266,6 +310,8 @@ final class PoseDatabase {
                 realm.delete(realm.objects(RLMPoseSession.self))
             }
             activeSessionID = nil
+            activeEpoch = -1
+            sessionIDByEpoch.removeAll()
             frameCounter = 0
         }
     }
