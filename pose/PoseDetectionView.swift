@@ -1417,10 +1417,6 @@ struct PoseDetectionView: View {
             let h = max(geometry.size.height, 1)
             let bottomPanelHeight = cameraBottomPanelHeight(for: h)
             let safeBottom = geometry.safeAreaInsets.bottom
-            // 隱藏鈕獨立浮在選單上方，避免被高大底部面板往上頂出畫面。
-            let hideButtonBottomPadding: CGFloat = isBottomPanelHidden
-                ? max(safeBottom, 12) + 8
-                : bottomPanelHeight + safeBottom + 10
 
             cameraPreviewStack(width: w, height: h)
                 .overlay(alignment: .top) {
@@ -1430,25 +1426,33 @@ struct PoseDetectionView: View {
                     poseHUDOverlay(safeTop: geometry.safeAreaInsets.top)
                 }
                 .overlay(alignment: .bottom) {
-                    Group {
-                        if !isBottomPanelHidden {
-                            bottomPanel(height: bottomPanelHeight, safeBottom: safeBottom)
-                                .transition(.move(edge: .bottom).combined(with: .opacity))
-                        }
-                    }
-                    .animation(.easeInOut(duration: 0.25), value: isBottomPanelHidden)
-                }
-                .overlay(alignment: .bottom) {
-                    bottomPanelToggle
-                        .padding(.bottom, hideButtonBottomPadding)
-                        .frame(maxWidth: .infinity)
-                        .zIndex(5)
+                    bottomChrome(height: bottomPanelHeight, safeBottom: safeBottom)
                 }
                 .overlay(alignment: .bottomTrailing) {
                     quickPoseVersionLabel
                         .padding(.bottom, isBottomPanelHidden ? 36 : 0)
                 }
         }
+    }
+
+    /// 底部選單；「隱藏」鈕置中卡在選單頂邊（像 sheet grabber）。
+    @MainActor
+    private func bottomChrome(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
+        ZStack(alignment: .top) {
+            if !isBottomPanelHidden {
+                bottomPanel(height: panelHeight, safeBottom: safeBottom)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
+            bottomPanelToggle
+                // 展開時：半壓在選單頂邊正中央；收起時：留在螢幕底部。
+                .offset(y: isBottomPanelHidden ? 0 : -18)
+                .padding(.bottom, isBottomPanelHidden ? max(safeBottom, 12) : 0)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .zIndex(5)
+        }
+        .frame(maxWidth: .infinity)
+        .animation(.easeInOut(duration: 0.25), value: isBottomPanelHidden)
     }
 
     @MainActor
