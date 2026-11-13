@@ -693,9 +693,6 @@ struct PoseDetectionView: View {
     @MainActor
     private func bottomPanel(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            // 全寬醒目「隱藏」列：一定在偵測引擎上方，不會被裁切。
-            bottomPanelToggle
-
             DetectionEnginePickerRow()
             // 僅「自訓模型」顯示：選 QuickPose 或 MediaPipe 的自訓品質模型／資料庫。
             if assessmentEngine == .trainedModel {
@@ -1438,21 +1435,20 @@ struct PoseDetectionView: View {
         }
     }
 
-    /// 底部選單；展開時「隱藏」在選單內頂列正中，收起後改顯示「顯示控制」。
+    /// 底部選單；「隱藏」膠囊置中貼在選單頂邊（你標的白線位置），版面內不裁切。
     @MainActor
     private func bottomChrome(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
-        Group {
-            if isBottomPanelHidden {
-                bottomPanelToggle
-                    .padding(.bottom, max(safeBottom, 12) + 8)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .transition(.opacity)
-            } else {
+        VStack(spacing: 8) {
+            bottomPanelToggle
+                .frame(maxWidth: .infinity, alignment: .center)
+
+            if !isBottomPanelHidden {
                 bottomPanel(height: panelHeight, safeBottom: safeBottom)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .frame(maxWidth: .infinity)
+        .padding(.bottom, isBottomPanelHidden ? max(safeBottom, 12) : 0)
         .animation(.easeInOut(duration: 0.25), value: isBottomPanelHidden)
     }
 
@@ -1464,19 +1460,18 @@ struct PoseDetectionView: View {
                 isBottomPanelHidden.toggle()
             }
         } label: {
-            HStack(spacing: 8) {
-                Image(systemName: isBottomPanelHidden ? "chevron.up.circle.fill" : "chevron.down.circle.fill")
-                    .font(.title3.weight(.bold))
-                Text(isBottomPanelHidden ? "顯示下方選單" : "隱藏下方選單")
-                    .font(.headline.weight(.bold))
-                Spacer(minLength: 0)
+            HStack(spacing: 6) {
+                Image(systemName: isBottomPanelHidden ? "chevron.up" : "chevron.down")
+                    .font(.caption.weight(.bold))
+                Text(isBottomPanelHidden ? "顯示控制" : "隱藏")
+                    .font(.caption.weight(.bold))
             }
-            .foregroundStyle(.black)
+            .foregroundStyle(.white)
             .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.yellow, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .padding(.vertical, 8)
+            .background(.black.opacity(0.78), in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.28), lineWidth: 1))
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(isBottomPanelHidden ? "顯示下方偵測模型選單" : "隱藏下方偵測模型選單")
@@ -1608,10 +1603,6 @@ struct PoseDetectionView: View {
             Text("資料庫節點：\(quickPoseEngine.dbNodeCount)")
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.teal)
-            // 用來確認本機是否已跑到含隱藏鈕的 build；看到這行才代表有拉到新碼。
-            Text("UI build: hide-btn")
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(.yellow)
             if usesMediaPipeDataPlane {
                 Text("寫入 \(MediaPipeRealm.fileName)")
                     .font(.caption2.weight(.semibold))
