@@ -1434,12 +1434,12 @@ struct PoseDetectionView: View {
         }
     }
 
-    /// 底部控制區與收合按鈕。按鈕壓在控制區上緣正中；收起後仍留在畫面下方正中。
+    /// 底部控制區與收合按鈕。點「隱藏」可收起偵測引擎／模型選單，露出更多骨架畫面。
     @MainActor
     private func bottomChrome(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
-        VStack(spacing: isBottomPanelHidden ? 0 : -18) {
+        VStack(spacing: 8) {
             bottomPanelToggle
-                .zIndex(1)
+                .zIndex(2)
 
             if !isBottomPanelHidden {
                 bottomPanel(height: panelHeight, safeBottom: safeBottom)
@@ -1447,7 +1447,7 @@ struct PoseDetectionView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .padding(.bottom, isBottomPanelHidden ? max(safeBottom, 8) : 0)
+        .padding(.bottom, isBottomPanelHidden ? max(safeBottom, 10) : 0)
         .animation(.easeInOut(duration: 0.25), value: isBottomPanelHidden)
     }
 
@@ -1459,18 +1459,22 @@ struct PoseDetectionView: View {
                 isBottomPanelHidden.toggle()
             }
         } label: {
-            Label(
-                isBottomPanelHidden ? "顯示控制" : "隱藏",
-                systemImage: isBottomPanelHidden ? "chevron.up" : "chevron.down"
-            )
-            .font(.caption.weight(.semibold))
+            HStack(spacing: 6) {
+                Image(systemName: isBottomPanelHidden ? "chevron.up" : "chevron.down")
+                    .font(.caption.weight(.bold))
+                Text(isBottomPanelHidden ? "顯示控制" : "隱藏")
+                    .font(.caption.weight(.bold))
+            }
             .foregroundStyle(.white)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(.black.opacity(0.72), in: Capsule())
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(.black.opacity(0.78), in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.22), lineWidth: 1))
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(isBottomPanelHidden ? "顯示下方控制" : "隱藏下方控制")
+        .accessibilityLabel(isBottomPanelHidden ? "顯示下方偵測模型選單" : "隱藏下方偵測模型選單")
+        .accessibilityHint("收起或展開偵測引擎與骨架模型選單")
     }
 
     private func cameraBottomPanelHeight(for height: CGFloat) -> CGFloat {
