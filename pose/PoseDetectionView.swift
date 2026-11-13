@@ -137,7 +137,7 @@ final class QuickPoseEngine: ObservableObject {
         }
     }
 
-    /// MediaPipe 使用 BlazePose Full（`.good`）；自訓模型同樣用 Full 骨架再送後端。
+    /// 骨架列上的 QuickPose／MediaPipe 都沿用這份 Full（`.good`）工作階段，啟動後不重新載入模型。
     func startLoopIfNeeded() {
         guard !loopActive else { return }
         loopActive = true
@@ -786,6 +786,7 @@ struct PoseDetectionView: View {
     private func bottomPanel(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             DetectionEnginePickerRow()
+            SkeletonModelPickerRow()
             GaitActivityPickerRow()
             bottomControls
 
@@ -1568,7 +1569,7 @@ struct PoseDetectionView: View {
     private var poseStatusBadge: some View {
         VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(assessmentEngine.hudBadgeTitle)
+                Text("\(assessmentEngine.hudBadgeTitle) · \(modeStore.skeletonModel.shortTitle)")
                     .font(.caption.weight(.bold))
                     .foregroundStyle(assessmentEngine == .mediaPipe ? .mint : .orange)
                 Text(modeStore.activity.coreTitle)
