@@ -102,8 +102,7 @@ final class PoseDatabase {
     private let queue = DispatchQueue(label: "ai.pose.database", qos: .utility)
     private let epochLock = NSLock()
 
-    /// 呼叫端（主執行緒）的 session 世代。結束時把 closedEpoch 設成這個值，
-    /// 已排進 queue 的舊影格寫入會直接略過，暫停不必等整段 Realm 佇列跑完。
+    /// 呼叫端的 session 世代。結束後不再接受新影格；已排進佇列的影格仍會在收尾時一次寫入。
     private var sessionEpoch = 0
     private var closedEpoch = -1
 
@@ -112,6 +111,15 @@ final class PoseDatabase {
     private var activeEpoch = -1
     private var sessionIDByEpoch: [Int: String] = [:]
     private var frameCounter: Int = 0
+    /// 先積在記憶體，滿一批或暫停時才開一次 Realm 交易。每幀各寫一次會把檔案鎖佔滿，暫停就要等整段寫完。
+    private var pendingFrames: [PendingFrame] = []
+    private let flushBatchSize = 24
+
+    private struct PendingFrame {
+        let index: Int
+        let timestamp: Double
+        let nodes: [PoseNode]
+    }
 
     let fileURL: URL
 
@@ -133,6 +141,7 @@ final class PoseDatabase {
             self.activeSessionID = id
             self.activeEpoch = epoch
             self.frameCounter = 0
+            self.pendingFrames.removeAll(keepingCapacity: true)
             let session = RLMPoseSession()
             session.id = id
             session.startedAt = now
@@ -150,29 +159,13 @@ final class PoseDatabase {
         if isEpochClosed(epoch) { return }
         let ts = timestamp.timeIntervalSince1970
         queue.async { [weak self] in
-            guard let self, !self.isEpochClosed(epoch) else { return }
-            guard self.activeEpoch == epoch, let sid = self.activeSessionID, let realm = try? PoseRealm.open() else { return }
+            guard let self else { return }
+            guard self.activeEpoch == epoch, let sid = self.activeSessionID else { return }
             let frame = self.frameCounter
             self.frameCounter += 1
-
-            let frameObj = RLMPoseFrame()
-            frameObj.frameIndex = frame
-            frameObj.timestamp = ts
-            for n in nodes {
-                let node = RLMPoseNode()
-                node.joint = n.joint
-                node.x = n.x
-                node.y = n.y
-                node.z = n.z
-                node.visibility = n.visibility
-                node.presence = n.presence
-                frameObj.nodes.append(node)
-            }
-
-            try? realm.write {
-                if let session = realm.object(ofType: RLMPoseSession.self, forPrimaryKey: sid) {
-                    session.frames.append(frameObj)
-                }
+            self.pendingFrames.append(PendingFrame(index: frame, timestamp: ts, nodes: nodes))
+            if self.pendingFrames.count >= self.flushBatchSize, let realm = try? PoseRealm.open() {
+                self.flushPendingFrames(into: realm, sessionID: sid)
             }
         }
     }
@@ -183,6 +176,9 @@ final class PoseDatabase {
         let now = Date()
         queue.async { [weak self] in
             guard let self, let sid = self.sessionIDByEpoch.removeValue(forKey: epoch), let realm = try? PoseRealm.open() else { return }
+            if self.activeSessionID == sid {
+                self.flushPendingFrames(into: realm, sessionID: sid)
+            }
             try? realm.write {
                 if let session = realm.object(ofType: RLMPoseSession.self, forPrimaryKey: sid) {
                     session.endedAt = now
@@ -196,6 +192,33 @@ final class PoseDatabase {
                 self.activeSessionID = nil
                 self.activeEpoch = -1
                 self.frameCounter = 0
+                self.pendingFrames.removeAll(keepingCapacity: true)
+            }
+        }
+    }
+
+    /// 僅在 database queue 上呼叫。把積著的影格合成一次寫入。
+    private func flushPendingFrames(into realm: Realm, sessionID: String) {
+        guard !pendingFrames.isEmpty else { return }
+        let batch = pendingFrames
+        pendingFrames.removeAll(keepingCapacity: true)
+        try? realm.write {
+            guard let session = realm.object(ofType: RLMPoseSession.self, forPrimaryKey: sessionID) else { return }
+            for item in batch {
+                let frameObj = RLMPoseFrame()
+                frameObj.frameIndex = item.index
+                frameObj.timestamp = item.timestamp
+                for n in item.nodes {
+                    let node = RLMPoseNode()
+                    node.joint = n.joint
+                    node.x = n.x
+                    node.y = n.y
+                    node.z = n.z
+                    node.visibility = n.visibility
+                    node.presence = n.presence
+                    frameObj.nodes.append(node)
+                }
+                session.frames.append(frameObj)
             }
         }
     }
@@ -313,6 +336,7 @@ final class PoseDatabase {
             activeEpoch = -1
             sessionIDByEpoch.removeAll()
             frameCounter = 0
+            pendingFrames.removeAll(keepingCapacity: true)
         }
     }
 }
