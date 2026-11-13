@@ -15,6 +15,73 @@ import UniformTypeIdentifiers
 import QuickPoseCore
 import QuickPoseSwiftUI
 
+/// 只把最新一幀排進主執行緒，暫停按鈕才不會排在整段影格後面。
+private final class LatestFrameBuffer: @unchecked Sendable {
+    struct Item {
+        var status: QuickPose.Status
+        var image: UIImage?
+        var landmarks: QuickPose.Landmarks?
+    }
+
+    private let lock = NSLock()
+    private var generation = 0
+    private var stopped = true
+    private var scheduled = false
+    private var pending: Item?
+
+    @discardableResult
+    func reset() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        generation += 1
+        stopped = false
+        pending = nil
+        return generation
+    }
+
+    func stop() {
+        lock.lock()
+        generation += 1
+        stopped = true
+        pending = nil
+        lock.unlock()
+    }
+
+    func push(generation: Int, status: QuickPose.Status, image: UIImage?, landmarks: QuickPose.Landmarks?) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !stopped, generation == self.generation else { return false }
+        pending = Item(status: status, image: image, landmarks: landmarks)
+        if scheduled { return false }
+        scheduled = true
+        return true
+    }
+
+    func pop() -> Item? {
+        lock.lock()
+        defer { lock.unlock() }
+        if stopped {
+            pending = nil
+            scheduled = false
+            return nil
+        }
+        let item = pending
+        pending = nil
+        if item == nil { scheduled = false }
+        return item
+    }
+
+    func shouldScheduleFollowUp() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if stopped || pending == nil {
+            scheduled = false
+            return false
+        }
+        return true
+    }
+}
+
 private enum PauseAdvice {
     static func lines(for activity: GaitActivityMode) -> [String] {
         [activity.coreTitle + "："] + activity.corePrincipleLines + [
@@ -34,6 +101,7 @@ final class QuickPoseEngine: ObservableObject {
     private(set) var loopActive = false
     /// MediaPipe Full（`.good`）或自訓模型共用完整管線時由此指定模型。
     var assessmentEngine: PoseAssessmentEngine = .trainedModel
+    var skeletonModel: PoseSkeletonModel = .mediaPipe
     var activityMode: GaitActivityMode = .walking
     private var restartTask: Task<Void, Never>?
 
@@ -53,6 +121,8 @@ final class QuickPoseEngine: ObservableObject {
     @Published var recentSteps: [StepEvent] = []
     @Published private(set) var frameCallbackCount = 0
 
+    nonisolated private let frames = LatestFrameBuffer()
+
     init() {
         let raw = (Bundle.main.object(forInfoDictionaryKey: "QuickPoseSDKKey") as? String) ?? ""
         pose = QuickPose(sdkKey: raw.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -61,23 +131,24 @@ final class QuickPoseEngine: ObservableObject {
     func stopLoop() {
         restartTask?.cancel()
         restartTask = nil
+        frames.stop()
         if loopActive {
             pose.stop()
             loopActive = false
         }
     }
 
-    /// MediaPipe 使用 BlazePose Full（`.good`）；自訓模型同樣用 Full 骨架再送後端。
+    /// QuickPose 模型用輕量骨架；MediaPipe 模型用 BlazePose Full（`.good`）。
     func startLoopIfNeeded() {
         guard !loopActive else { return }
         loopActive = true
+        let generation = frames.reset()
 
         let features: [QuickPose.Feature] = [.overlay(.wholeBody)]
-        // 固定 Full：切換引擎不 reload 模型，骨架線才不會只在第一個引擎出現。
         let modelConfig = QuickPose.ModelConfig(
             detailedFaceTracking: false,
             detailedHandTracking: false,
-            modelComplexity: .good
+            modelComplexity: skeletonModel == .quickPose ? .light : .good
         )
 
         pose.start(features: features, modelConfig: modelConfig, onStart: { [weak self] in
@@ -86,9 +157,20 @@ final class QuickPoseEngine: ObservableObject {
                 self?.isEngineStarting = false
             }
         }) { [weak self] status, image, _, _, landmarks in
-            Task { @MainActor in
-                self?.processFrame(status: status, image: image, landmarks: landmarks)
+            guard let self else { return }
+            guard self.frames.push(generation: generation, status: status, image: image, landmarks: landmarks) else { return }
+            Task { @MainActor [weak self] in
+                self?.drainFrame()
             }
+        }
+    }
+
+    private func drainFrame() {
+        guard let next = frames.pop() else { return }
+        processFrame(status: next.status, image: next.image, landmarks: next.landmarks)
+        guard frames.shouldScheduleFollowUp() else { return }
+        Task { @MainActor [weak self] in
+            self?.drainFrame()
         }
     }
 
@@ -100,6 +182,7 @@ final class QuickPoseEngine: ObservableObject {
     /// 換模型複雜度必須先 stop，稍等再 start，否則 overlay 線條不會再畫。
     func scheduleRestart(hint: String = "正在切換偵測引擎…") {
         restartTask?.cancel()
+        frames.stop()
         if loopActive {
             pose.stop()
             loopActive = false
@@ -517,6 +600,11 @@ struct PoseDetectionView: View {
                 syncActivityMode()
                 if isPaused { applyPausedIdleState() }
             }
+            .onChange(of: modeStore.skeletonModel) { _, newModel in
+                quickPoseEngine.skeletonModel = newModel
+                guard quickPoseEngine.loopActive else { return }
+                quickPoseEngine.scheduleRestart(hint: "正在切換\(newModel.shortTitle)骨架…")
+            }
             .onChange(of: auth.userProfile) { _, _ in
                 syncBodyGaitProfile()
             }
@@ -703,6 +791,7 @@ struct PoseDetectionView: View {
     private func bottomPanel(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             DetectionEnginePickerRow()
+            SkeletonModelPickerRow()
             GaitActivityPickerRow()
             bottomControls
 
@@ -961,6 +1050,7 @@ struct PoseDetectionView: View {
     @MainActor
     private func syncAssessmentEngine() {
         quickPoseEngine.assessmentEngine = assessmentEngine
+        quickPoseEngine.skeletonModel = modeStore.skeletonModel
     }
 
     @MainActor
@@ -1070,23 +1160,6 @@ struct PoseDetectionView: View {
             resetStepUIState()
             livePrediction = nil
             videoQualityResult = nil
-        }
-    }
-
-    /// 使用者暫停：只停資料寫入，QuickPose 引擎保持運轉（官方 demo 僅 onDisappear 才 stop）。
-    @MainActor
-    private func pauseDetectionProcessing(fullReset: Bool) {
-        cancelCountdown()
-        quickPoseEngine.detectionActive = false
-        finishDatabaseSession()
-        stopStreaming()
-        quickPoseEngine.isEngineStarting = false
-        if fullReset {
-            analysisPipeline.reset()
-            resetStepUIState()
-            livePrediction = nil
-            videoQualityResult = nil
-            quickPoseEngine.dbNodeCount = 0
         }
     }
 
@@ -1491,17 +1564,6 @@ struct PoseDetectionView: View {
             poseStatusBadge
                 .frame(maxWidth: width * 0.5, alignment: .leading)
             Spacer(minLength: 8)
-            Button {
-                showPhotosPicker = true
-            } label: {
-                Label("選影片", systemImage: "film.fill")
-                    .font(.caption.weight(.bold))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.purple)
-            .disabled(isLoadingVideo)
             appMenuButton
         }
         .padding(.horizontal, 12)
@@ -1513,7 +1575,7 @@ struct PoseDetectionView: View {
     private var poseStatusBadge: some View {
         VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(assessmentEngine.hudBadgeTitle)
+                Text("\(assessmentEngine.hudBadgeTitle) · \(modeStore.skeletonModel.shortTitle)")
                     .font(.caption.weight(.bold))
                     .foregroundStyle(assessmentEngine == .mediaPipe ? .mint : .orange)
                 Text(modeStore.activity.coreTitle)
@@ -1668,16 +1730,29 @@ struct PoseDetectionView: View {
         cancelCountdown()
         if engineAttached {
             summaryLines = buildSummaryLinesForHistory()
-            autoSaveSummaryToHistory()
         }
-        pauseDetectionProcessing(fullReset: true)
+        quickPoseEngine.detectionActive = false
         isPaused = true
+        quickPoseEngine.isEngineStarting = false
         quickPoseEngine.fpsText = "FPS: —（已暫停）"
-        quickPoseEngine.adviceLines = PauseAdvice.lines(for: modeStore.activity)
-        if historySavedForSession {
-            quickPoseEngine.adviceLines = ["偵測已暫停，摘要已存入歷史紀錄。"] + PauseAdvice.lines(for: modeStore.activity)
-        }
         quickPoseEngine.statusHint = ""
+        let activity = modeStore.activity
+        quickPoseEngine.adviceLines = PauseAdvice.lines(for: activity)
+        DispatchQueue.main.async {
+            if self.engineAttached {
+                self.autoSaveSummaryToHistory()
+                if self.historySavedForSession {
+                    self.quickPoseEngine.adviceLines = ["偵測已暫停，摘要已存入歷史紀錄。"] + PauseAdvice.lines(for: activity)
+                }
+            }
+            self.finishDatabaseSession()
+            self.stopStreaming()
+            self.analysisPipeline.reset()
+            self.resetStepUIState()
+            self.livePrediction = nil
+            self.videoQualityResult = nil
+            self.quickPoseEngine.dbNodeCount = 0
+        }
     }
 
     @MainActor
