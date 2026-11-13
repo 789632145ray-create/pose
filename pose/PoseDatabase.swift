@@ -163,6 +163,20 @@ final class PoseDatabase {
     /// 目前進行中的 session（僅在 queue 上存取）。
     private var activeSessionID: String?
     private var frameCounter: Int = 0
+    /// 暫停時主執行緒若用 queue.sync 等每一幀的 Realm 寫入，QuickPose 會卡很久。
+    /// 影格先積在記憶體，滿一批或結束時才寫一次。
+    private var pendingFrames: [PendingFrame] = []
+    private let flushBatchSize = 24
+    private let epochLock = NSLock()
+    private var sessionEpoch = 0
+    private var closedEpoch = -1
+    private var activeEpoch = -1
+
+    private struct PendingFrame {
+        let index: Int
+        let timestamp: Double
+        let nodes: [PoseNode]
+    }
 
     private init(
         kind: PoseNodeStoreKind,
@@ -184,10 +198,13 @@ final class PoseDatabase {
     func beginSession(sourceLabel: String) -> String {
         let id = UUID().uuidString
         let now = Date()
+        let epoch = nextEpoch()
         queue.sync { [weak self] in
             guard let self, let realm = try? self.openRealm() else { return }
             self.activeSessionID = id
+            self.activeEpoch = epoch
             self.frameCounter = 0
+            self.pendingFrames.removeAll(keepingCapacity: true)
             let session = RLMPoseSession()
             session.id = id
             session.startedAt = now
@@ -201,38 +218,27 @@ final class PoseDatabase {
 
     func recordFrame(nodes: [PoseNode], timestamp: Date = Date()) {
         guard !nodes.isEmpty else { return }
+        let epoch = currentEpoch()
+        if isEpochClosed(epoch) { return }
         let ts = timestamp.timeIntervalSince1970
         queue.async { [weak self] in
-            guard let self, let sid = self.activeSessionID, let realm = try? self.openRealm() else { return }
+            guard let self, self.activeEpoch == epoch, let sid = self.activeSessionID else { return }
             let frame = self.frameCounter
             self.frameCounter += 1
-
-            let frameObj = RLMPoseFrame()
-            frameObj.frameIndex = frame
-            frameObj.timestamp = ts
-            for n in nodes {
-                let node = RLMPoseNode()
-                node.joint = n.joint
-                node.x = n.x
-                node.y = n.y
-                node.z = n.z
-                node.visibility = n.visibility
-                node.presence = n.presence
-                frameObj.nodes.append(node)
-            }
-
-            try? realm.write {
-                if let session = realm.object(ofType: RLMPoseSession.self, forPrimaryKey: sid) {
-                    session.frames.append(frameObj)
-                }
+            self.pendingFrames.append(PendingFrame(index: frame, timestamp: ts, nodes: nodes))
+            if self.pendingFrames.count >= self.flushBatchSize, let realm = try? self.openRealm() {
+                self.flushPendingFrames(into: realm, sessionID: sid)
             }
         }
     }
 
     func endSession(totalSteps: Int, leftSteps: Int, rightSteps: Int, avgCadenceBPM: Double?) {
+        let epoch = currentEpoch()
+        closeEpoch(epoch)
         let now = Date()
-        queue.sync { [weak self] in
-            guard let self, let sid = self.activeSessionID, let realm = try? self.openRealm() else { return }
+        queue.async { [weak self] in
+            guard let self, self.activeEpoch == epoch, let sid = self.activeSessionID, let realm = try? self.openRealm() else { return }
+            self.flushPendingFrames(into: realm, sessionID: sid)
             try? realm.write {
                 if let session = realm.object(ofType: RLMPoseSession.self, forPrimaryKey: sid) {
                     session.endedAt = now
@@ -242,9 +248,64 @@ final class PoseDatabase {
                     session.avgCadenceBPM = avgCadenceBPM
                 }
             }
-            self.activeSessionID = nil
-            self.frameCounter = 0
+            if self.activeEpoch == epoch {
+                self.activeSessionID = nil
+                self.activeEpoch = -1
+                self.frameCounter = 0
+                self.pendingFrames.removeAll(keepingCapacity: true)
+            }
         }
+    }
+
+    /// 僅在 database queue 上呼叫。
+    private func flushPendingFrames(into realm: Realm, sessionID: String) {
+        guard !pendingFrames.isEmpty else { return }
+        let batch = pendingFrames
+        pendingFrames.removeAll(keepingCapacity: true)
+        try? realm.write {
+            guard let session = realm.object(ofType: RLMPoseSession.self, forPrimaryKey: sessionID) else { return }
+            for item in batch {
+                let frameObj = RLMPoseFrame()
+                frameObj.frameIndex = item.index
+                frameObj.timestamp = item.timestamp
+                for n in item.nodes {
+                    let node = RLMPoseNode()
+                    node.joint = n.joint
+                    node.x = n.x
+                    node.y = n.y
+                    node.z = n.z
+                    node.visibility = n.visibility
+                    node.presence = n.presence
+                    frameObj.nodes.append(node)
+                }
+                session.frames.append(frameObj)
+            }
+        }
+    }
+
+    private func nextEpoch() -> Int {
+        epochLock.lock()
+        defer { epochLock.unlock() }
+        sessionEpoch += 1
+        return sessionEpoch
+    }
+
+    private func currentEpoch() -> Int {
+        epochLock.lock()
+        defer { epochLock.unlock() }
+        return sessionEpoch
+    }
+
+    private func closeEpoch(_ epoch: Int) {
+        epochLock.lock()
+        closedEpoch = epoch
+        epochLock.unlock()
+    }
+
+    private func isEpochClosed(_ epoch: Int) -> Bool {
+        epochLock.lock()
+        defer { epochLock.unlock() }
+        return closedEpoch == epoch
     }
 
     // MARK: 查詢
@@ -406,7 +467,9 @@ final class PoseDatabase {
                 realm.delete(realm.objects(RLMPoseSession.self))
             }
             activeSessionID = nil
+            activeEpoch = -1
             frameCounter = 0
+            pendingFrames.removeAll(keepingCapacity: true)
         }
     }
 }

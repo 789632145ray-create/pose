@@ -15,6 +15,73 @@ import UniformTypeIdentifiers
 import QuickPoseCore
 import QuickPoseSwiftUI
 
+/// 只把最新一幀排進主執行緒。QuickPose 每幀都開一個 MainActor 工作時，暫停按鈕會排在後面。
+private final class LatestFrameBuffer: @unchecked Sendable {
+    struct Item {
+        var status: QuickPose.Status
+        var image: UIImage?
+        var landmarks: QuickPose.Landmarks?
+    }
+
+    private let lock = NSLock()
+    private var generation = 0
+    private var stopped = true
+    private var scheduled = false
+    private var pending: Item?
+
+    @discardableResult
+    func reset() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        generation += 1
+        stopped = false
+        pending = nil
+        return generation
+    }
+
+    func stop() {
+        lock.lock()
+        generation += 1
+        stopped = true
+        pending = nil
+        lock.unlock()
+    }
+
+    func push(generation: Int, status: QuickPose.Status, image: UIImage?, landmarks: QuickPose.Landmarks?) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !stopped, generation == self.generation else { return false }
+        pending = Item(status: status, image: image, landmarks: landmarks)
+        if scheduled { return false }
+        scheduled = true
+        return true
+    }
+
+    func pop() -> Item? {
+        lock.lock()
+        defer { lock.unlock() }
+        if stopped {
+            pending = nil
+            scheduled = false
+            return nil
+        }
+        let item = pending
+        pending = nil
+        if item == nil { scheduled = false }
+        return item
+    }
+
+    func shouldScheduleFollowUp() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if stopped || pending == nil {
+            scheduled = false
+            return false
+        }
+        return true
+    }
+}
+
 private enum PauseAdvice {
     static func lines(for activity: GaitActivityMode) -> [String] {
         [activity.coreTitle + "："] + activity.corePrincipleLines + [
@@ -53,6 +120,8 @@ final class QuickPoseEngine: ObservableObject {
     @Published var recentSteps: [StepEvent] = []
     @Published private(set) var frameCallbackCount = 0
 
+    nonisolated private let frames = LatestFrameBuffer()
+
     init() {
         let raw = (Bundle.main.object(forInfoDictionaryKey: "QuickPoseSDKKey") as? String) ?? ""
         pose = QuickPose(sdkKey: raw.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -61,6 +130,7 @@ final class QuickPoseEngine: ObservableObject {
     func stopLoop() {
         restartTask?.cancel()
         restartTask = nil
+        frames.stop()
         if loopActive {
             pose.stop()
             loopActive = false
@@ -71,6 +141,7 @@ final class QuickPoseEngine: ObservableObject {
     func startLoopIfNeeded() {
         guard !loopActive else { return }
         loopActive = true
+        let generation = frames.reset()
 
         let features: [QuickPose.Feature] = [.overlay(.wholeBody)]
         // 固定 Full：切換引擎不 reload 模型，骨架線才不會只在第一個引擎出現。
@@ -86,9 +157,20 @@ final class QuickPoseEngine: ObservableObject {
                 self?.isEngineStarting = false
             }
         }) { [weak self] status, image, _, _, landmarks in
-            Task { @MainActor in
-                self?.processFrame(status: status, image: image, landmarks: landmarks)
+            guard let self else { return }
+            guard self.frames.push(generation: generation, status: status, image: image, landmarks: landmarks) else { return }
+            Task { @MainActor [weak self] in
+                self?.drainFrame()
             }
+        }
+    }
+
+    private func drainFrame() {
+        guard let next = frames.pop() else { return }
+        processFrame(status: next.status, image: next.image, landmarks: next.landmarks)
+        guard frames.shouldScheduleFollowUp() else { return }
+        Task { @MainActor [weak self] in
+            self?.drainFrame()
         }
     }
 
@@ -100,6 +182,7 @@ final class QuickPoseEngine: ObservableObject {
     /// 換模型複雜度必須先 stop，稍等再 start，否則 overlay 線條不會再畫。
     func scheduleRestart(hint: String = "正在切換偵測引擎…") {
         restartTask?.cancel()
+        frames.stop()
         if loopActive {
             pose.stop()
             loopActive = false
@@ -1037,23 +1120,6 @@ struct PoseDetectionView: View {
         }
     }
 
-    /// 使用者暫停：只停資料寫入，QuickPose 引擎保持運轉（官方 demo 僅 onDisappear 才 stop）。
-    @MainActor
-    private func pauseDetectionProcessing(fullReset: Bool) {
-        cancelCountdown()
-        quickPoseEngine.detectionActive = false
-        finishDatabaseSession()
-        stopStreaming()
-        quickPoseEngine.isEngineStarting = false
-        if fullReset {
-            analysisPipeline.reset()
-            resetStepUIState()
-            livePrediction = nil
-            videoQualityResult = nil
-            quickPoseEngine.dbNodeCount = 0
-        }
-    }
-
     @MainActor
     private func confirmPendingVideo() {
         guard let pending = pendingVideo else { return }
@@ -1634,16 +1700,29 @@ struct PoseDetectionView: View {
         cancelCountdown()
         if engineAttached {
             summaryLines = buildSummaryLinesForHistory()
-            autoSaveSummaryToHistory()
         }
-        pauseDetectionProcessing(fullReset: true)
+        quickPoseEngine.detectionActive = false
         isPaused = true
+        quickPoseEngine.isEngineStarting = false
         quickPoseEngine.fpsText = "FPS: —（已暫停）"
-        quickPoseEngine.adviceLines = PauseAdvice.lines(for: modeStore.activity)
-        if historySavedForSession {
-            quickPoseEngine.adviceLines = ["偵測已暫停，摘要已存入歷史紀錄。"] + PauseAdvice.lines(for: modeStore.activity)
-        }
         quickPoseEngine.statusHint = ""
+        let activity = modeStore.activity
+        quickPoseEngine.adviceLines = PauseAdvice.lines(for: activity)
+        DispatchQueue.main.async {
+            if self.engineAttached {
+                self.autoSaveSummaryToHistory()
+                if self.historySavedForSession {
+                    self.quickPoseEngine.adviceLines = ["偵測已暫停，摘要已存入歷史紀錄。"] + PauseAdvice.lines(for: activity)
+                }
+            }
+            self.finishDatabaseSession()
+            self.stopStreaming()
+            self.analysisPipeline.reset()
+            self.resetStepUIState()
+            self.livePrediction = nil
+            self.videoQualityResult = nil
+            self.quickPoseEngine.dbNodeCount = 0
+        }
     }
 
     @MainActor
