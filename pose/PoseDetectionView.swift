@@ -101,7 +101,6 @@ final class QuickPoseEngine: ObservableObject {
     private(set) var loopActive = false
     /// MediaPipe Full（`.good`）或自訓模型共用完整管線時由此指定模型。
     var assessmentEngine: PoseAssessmentEngine = .trainedModel
-    var skeletonModel: PoseSkeletonModel = .mediaPipe
     var activityMode: GaitActivityMode = .walking
     private var restartTask: Task<Void, Never>?
 
@@ -138,17 +137,18 @@ final class QuickPoseEngine: ObservableObject {
         }
     }
 
-    /// QuickPose 模型用輕量骨架；MediaPipe 模型用 BlazePose Full（`.good`）。
+    /// MediaPipe 使用 BlazePose Full（`.good`）；自訓模型同樣用 Full 骨架再送後端。
     func startLoopIfNeeded() {
         guard !loopActive else { return }
         loopActive = true
         let generation = frames.reset()
 
         let features: [QuickPose.Feature] = [.overlay(.wholeBody)]
+        // 固定 Full：切換引擎不 reload 模型，骨架線才不會只在第一個引擎出現。
         let modelConfig = QuickPose.ModelConfig(
             detailedFaceTracking: false,
             detailedHandTracking: false,
-            modelComplexity: skeletonModel == .quickPose ? .light : .good
+            modelComplexity: .good
         )
 
         pose.start(features: features, modelConfig: modelConfig, onStart: { [weak self] in
@@ -600,11 +600,6 @@ struct PoseDetectionView: View {
                 syncActivityMode()
                 if isPaused { applyPausedIdleState() }
             }
-            .onChange(of: modeStore.skeletonModel) { _, newModel in
-                quickPoseEngine.skeletonModel = newModel
-                guard quickPoseEngine.loopActive else { return }
-                quickPoseEngine.scheduleRestart(hint: "正在切換\(newModel.shortTitle)骨架…")
-            }
             .onChange(of: auth.userProfile) { _, _ in
                 syncBodyGaitProfile()
             }
@@ -791,7 +786,6 @@ struct PoseDetectionView: View {
     private func bottomPanel(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             DetectionEnginePickerRow()
-            SkeletonModelPickerRow()
             GaitActivityPickerRow()
             bottomControls
 
@@ -1050,7 +1044,6 @@ struct PoseDetectionView: View {
     @MainActor
     private func syncAssessmentEngine() {
         quickPoseEngine.assessmentEngine = assessmentEngine
-        quickPoseEngine.skeletonModel = modeStore.skeletonModel
     }
 
     @MainActor
@@ -1564,6 +1557,17 @@ struct PoseDetectionView: View {
             poseStatusBadge
                 .frame(maxWidth: width * 0.5, alignment: .leading)
             Spacer(minLength: 8)
+            Button {
+                showPhotosPicker = true
+            } label: {
+                Label("選影片", systemImage: "film.fill")
+                    .font(.caption.weight(.bold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.purple)
+            .disabled(isLoadingVideo)
             appMenuButton
         }
         .padding(.horizontal, 12)
@@ -1575,7 +1579,7 @@ struct PoseDetectionView: View {
     private var poseStatusBadge: some View {
         VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(assessmentEngine.hudBadgeTitle) · \(modeStore.skeletonModel.shortTitle)")
+                Text(assessmentEngine.hudBadgeTitle)
                     .font(.caption.weight(.bold))
                     .foregroundStyle(assessmentEngine == .mediaPipe ? .mint : .orange)
                 Text(modeStore.activity.coreTitle)
