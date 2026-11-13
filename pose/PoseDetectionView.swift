@@ -693,6 +693,13 @@ struct PoseDetectionView: View {
     @MainActor
     private func bottomPanel(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 8) {
+            // 「隱藏」放在選單頂列正中央（版面內，不會被 offset 裁掉）。
+            HStack {
+                Spacer(minLength: 0)
+                bottomPanelToggle
+                Spacer(minLength: 0)
+            }
+
             DetectionEnginePickerRow()
             // 僅「自訓模型」顯示：選 QuickPose 或 MediaPipe 的自訓品質模型／資料庫。
             if assessmentEngine == .trainedModel {
@@ -717,9 +724,8 @@ struct PoseDetectionView: View {
             bottomAdviceSection
             bottomStepsSection
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 22) // 留給頂邊置中的「隱藏」鈕
-        .padding(.bottom, 12 + safeBottom)
+        .padding(12)
+        .padding(.bottom, safeBottom)
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: panelHeight + safeBottom, alignment: .top)
         .background(.black.opacity(0.65))
@@ -1436,21 +1442,19 @@ struct PoseDetectionView: View {
         }
     }
 
-    /// 底部選單；「隱藏」鈕置中卡在選單頂邊（像 sheet grabber）。
+    /// 底部選單；展開時「隱藏」在選單內頂列正中，收起後改顯示「顯示控制」。
     @MainActor
     private func bottomChrome(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
-        ZStack(alignment: .top) {
-            if !isBottomPanelHidden {
+        Group {
+            if isBottomPanelHidden {
+                bottomPanelToggle
+                    .padding(.bottom, max(safeBottom, 12) + 8)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .transition(.opacity)
+            } else {
                 bottomPanel(height: panelHeight, safeBottom: safeBottom)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-
-            bottomPanelToggle
-                // 展開時：半壓在選單頂邊正中央；收起時：留在螢幕底部。
-                .offset(y: isBottomPanelHidden ? 0 : -18)
-                .padding(.bottom, isBottomPanelHidden ? max(safeBottom, 12) : 0)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .zIndex(5)
         }
         .frame(maxWidth: .infinity)
         .animation(.easeInOut(duration: 0.25), value: isBottomPanelHidden)
@@ -1466,16 +1470,15 @@ struct PoseDetectionView: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: isBottomPanelHidden ? "chevron.up" : "chevron.down")
-                    .font(.caption.weight(.bold))
+                    .font(.subheadline.weight(.bold))
                 Text(isBottomPanelHidden ? "顯示控制" : "隱藏")
-                    .font(.caption.weight(.bold))
+                    .font(.subheadline.weight(.bold))
             }
             .foregroundStyle(.white)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
-            .background(.black.opacity(0.82), in: Capsule())
-            .overlay(Capsule().strokeBorder(Color.white.opacity(0.28), lineWidth: 1))
-            .shadow(color: .black.opacity(0.35), radius: 6, y: 2)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
+            .background(Color.white.opacity(0.22), in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.55), lineWidth: 1.5))
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
