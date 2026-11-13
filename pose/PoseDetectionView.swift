@@ -717,8 +717,9 @@ struct PoseDetectionView: View {
             bottomAdviceSection
             bottomStepsSection
         }
-        .padding(12)
-        .padding(.bottom, safeBottom)
+        .padding(.horizontal, 12)
+        .padding(.top, 22) // 留給頂邊置中的「隱藏」鈕
+        .padding(.bottom, 12 + safeBottom)
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: panelHeight + safeBottom, alignment: .top)
         .background(.black.opacity(0.65))
