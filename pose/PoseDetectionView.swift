@@ -1551,17 +1551,8 @@ struct PoseDetectionView: View {
         HStack(alignment: .top, spacing: 10) {
             poseStatusBadge
             Spacer(minLength: 8)
-            Button {
-                showPhotosPicker = true
-            } label: {
-                Label("選影片", systemImage: "film.fill")
-                    .font(.caption.weight(.bold))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.purple)
-            .disabled(isLoadingVideo)
+            // 右上角改為選單（影片仍可從下方「上傳影片偵測」選）。
+            appMenuButton
         }
         .padding(.horizontal, 12)
         // GeometryReader 在 ignoresSafeArea 下 safeTop 可能是 0；右上角又是控制中心熱區。
@@ -1571,21 +1562,17 @@ struct PoseDetectionView: View {
 
     private var poseStatusBadge: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .center, spacing: 8) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(
-                        assessmentEngine == .trainedModel
-                            ? "\(assessmentEngine.hudBadgeTitle) · \(modeStore.skeletonModel.shortTitle)"
-                            : assessmentEngine.hudBadgeTitle
-                    )
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(usesMediaPipeDataPlane ? .mint : .orange)
-                    Text(modeStore.activity.coreTitle)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(modeStore.activity == .running ? .orange : .cyan)
-                }
-                Spacer(minLength: 4)
-                appMenuButton
+            VStack(alignment: .leading, spacing: 2) {
+                Text(
+                    assessmentEngine == .trainedModel
+                        ? "\(assessmentEngine.hudBadgeTitle) · \(modeStore.skeletonModel.shortTitle)"
+                        : assessmentEngine.hudBadgeTitle
+                )
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(usesMediaPipeDataPlane ? .mint : .orange)
+                Text(modeStore.activity.coreTitle)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(modeStore.activity == .running ? .orange : .cyan)
             }
             Text(quickPoseEngine.fpsText)
                 .font(.system(size: 16, weight: .semibold, design: .rounded))
