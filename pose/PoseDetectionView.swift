@@ -1557,17 +1557,6 @@ struct PoseDetectionView: View {
             poseStatusBadge
                 .frame(maxWidth: width * 0.5, alignment: .leading)
             Spacer(minLength: 8)
-            Button {
-                showPhotosPicker = true
-            } label: {
-                Label("選影片", systemImage: "film.fill")
-                    .font(.caption.weight(.bold))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.purple)
-            .disabled(isLoadingVideo)
             appMenuButton
         }
         .padding(.horizontal, 12)
