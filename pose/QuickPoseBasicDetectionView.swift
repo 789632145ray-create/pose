@@ -94,15 +94,14 @@ struct QuickPoseBasicDetectionView: View {
     @State private var isLoadingVideo = false
     @State private var cameraAuthorized = false
 
-    private enum BasicInputMode: String, CaseIterable, Identifiable {
+    private enum BasicInputMode: String, CaseIterable {
         case liveCamera = "相機"
         case video = "影片"
-        var id: String { rawValue }
     }
 
     var body: some View {
         ZStack {
-            PoseChrome.canvas.ignoresSafeArea()
+            Color(red: 0.10, green: 0.10, blue: 0.12).ignoresSafeArea()
 
             if inputMode == .liveCamera, !cameraAuthorized {
                 cameraGatePanel
@@ -122,7 +121,7 @@ struct QuickPoseBasicDetectionView: View {
         VStack(spacing: 16) {
             Text("QuickPose 原生模式")
                 .font(.title3.weight(.bold))
-                .foregroundStyle(PoseChrome.primaryText)
+                .foregroundStyle(.white)
             Text("需要相機權限。請允許後會自動開始偵測。")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.white.opacity(0.85))
@@ -131,8 +130,7 @@ struct QuickPoseBasicDetectionView: View {
                 requestCameraAccess()
             }
             .buttonStyle(.borderedProminent)
-            .tint(PoseChrome.accent)
-            .foregroundStyle(.black)
+            .tint(.green)
         }
         .padding()
     }
@@ -187,74 +185,82 @@ struct QuickPoseBasicDetectionView: View {
     }
 
     private var hudPanel: some View {
-        PoseGlassCard {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("SDK CHECK")
-                    .font(.system(size: 10, weight: .bold))
-                    .tracking(0.8)
-                    .foregroundStyle(PoseChrome.label)
-                Text(runner.fpsText)
-                    .font(.system(size: 22, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(PoseChrome.primaryText)
-                Text(runner.statusLine)
-                    .font(.caption)
-                    .foregroundStyle(PoseChrome.label)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("QuickPose 原生")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.cyan)
+            Text("Lite overlay · 切換 MediaPipe 可做完整骨架分析")
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.7))
+            Text(runner.fpsText)
+                .font(.system(size: 17, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white)
+            Text(runner.statusLine)
+                .font(.caption)
+                .foregroundStyle(.yellow)
+            Text("v\(runner.quickPose.quickPoseVersion())")
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.6))
         }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var controlPanel: some View {
-        PoseGlassCard {
-            VStack(spacing: PoseChrome.spacingSM) {
-                DetectionEnginePickerRow()
+        VStack(spacing: 10) {
+            DetectionEnginePickerRow()
 
-                PoseSegmentChipRow(
-                    options: BasicInputMode.allCases,
-                    selection: $inputMode,
-                    title: { $0.rawValue }
-                )
-                .onChange(of: inputMode) { _, newMode in
-                    runner.stop()
-                    if newMode == .liveCamera {
-                        videoURL = nil
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                        runner.start()
-                    }
+            Picker("輸入來源", selection: $inputMode) {
+                ForEach(BasicInputMode.allCases, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
                 }
-
-                if inputMode == .video {
-                    PhotosPicker(selection: $pickedItem, matching: .videos, photoLibrary: .shared()) {
-                        HStack {
-                            if isLoadingVideo { ProgressView().tint(.white) }
-                            Label(videoURL == nil ? "選擇影片" : "重新選擇影片", systemImage: "film.fill")
-                                .font(.subheadline.weight(.semibold))
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(PoseChrome.accent)
-                    .foregroundStyle(.black)
-                    .disabled(isLoadingVideo)
-                }
-
-                Button {
-                    PoseChrome.impact(.light)
-                    runner.stop()
-                    runner.start()
-                } label: {
-                    Label("重新 start 引擎", systemImage: "arrow.clockwise")
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                }
-                .buttonStyle(.bordered)
-                .tint(.white)
             }
+            .pickerStyle(.segmented)
+            .onChange(of: inputMode) { _, newMode in
+                runner.stop()
+                if newMode == .liveCamera {
+                    videoURL = nil
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    runner.start()
+                }
+            }
+
+            if inputMode == .video {
+                PhotosPicker(selection: $pickedItem, matching: .videos, photoLibrary: .shared()) {
+                    HStack {
+                        if isLoadingVideo { ProgressView().tint(.white) }
+                        Label(videoURL == nil ? "選擇影片" : "重新選擇影片", systemImage: "film.fill")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.purple)
+                .disabled(isLoadingVideo)
+            }
+
+            Button {
+                runner.stop()
+                runner.start()
+            } label: {
+                Label("重新 start 引擎", systemImage: "arrow.clockwise")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+            }
+            .buttonStyle(.bordered)
+            .tint(.orange)
+
+            Text("此模式對照官方 demo：無倒數、無暫停邏輯。若這裡有 FPS，代表 SDK 正常。")
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.55))
+                .multilineTextAlignment(.center)
         }
+        .padding(12)
+        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
     }
 
     private func refreshCameraAuthorization() {
