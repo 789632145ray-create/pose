@@ -438,6 +438,8 @@ struct PoseDetectionView: View {
     @State private var showHistory = false
     @State private var showMemberProfile = false
     @State private var showAppMenu = false
+    /// 底部控制區可收起，讓骨架畫面不被擋住。
+    @State private var isBottomPanelHidden = false
     @State private var lastSavedID: UUID?
     /// 本次偵測 session 是否已自動寫入歷史（避免重複儲存）。
     @State private var historySavedForSession = false
@@ -746,6 +748,39 @@ struct PoseDetectionView: View {
         }
     }
 
+    /// 底部控制區與收合按鈕。按鈕壓在控制區上緣正中；收起後仍留在畫面下方正中。
+    @MainActor
+    private func bottomChrome(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
+        VStack(spacing: isBottomPanelHidden ? 0 : -18) {
+            bottomPanelToggle
+                .zIndex(1)
+
+            if !isBottomPanelHidden {
+                bottomPanel(height: panelHeight, safeBottom: safeBottom)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.bottom, isBottomPanelHidden ? max(safeBottom, 8) : 0)
+        .animation(.easeInOut(duration: 0.25), value: isBottomPanelHidden)
+    }
+
+    @MainActor
+    private var bottomPanelToggle: some View {
+        Button {
+            isBottomPanelHidden.toggle()
+        } label: {
+            Label(isBottomPanelHidden ? "顯示控制" : "隱藏", systemImage: isBottomPanelHidden ? "chevron.up" : "chevron.down")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.black.opacity(0.72), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isBottomPanelHidden ? "顯示下方控制" : "隱藏下方控制")
+    }
+
     /// 底部固定高度區塊，避免偵測中文字變多時整片介面上下跳動。
     @MainActor
     private func bottomPanel(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
@@ -924,7 +959,8 @@ struct PoseDetectionView: View {
                 .font(.title2)
                 .foregroundStyle(.white)
                 .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
+                .background(.ultraThinMaterial, in: Circle())
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("選單")
@@ -1437,10 +1473,10 @@ struct PoseDetectionView: View {
                     stepFlashOverlay(safeTop: geometry.safeAreaInsets.top)
                 }
                 .overlay(alignment: .top) {
-                    poseHUDOverlay(safeTop: geometry.safeAreaInsets.top)
+                    poseHUDOverlay(safeTop: geometry.safeAreaInsets.top, width: w)
                 }
                 .overlay(alignment: .bottom) {
-                    bottomPanel(height: bottomPanelHeight, safeBottom: geometry.safeAreaInsets.bottom)
+                    bottomChrome(height: bottomPanelHeight, safeBottom: geometry.safeAreaInsets.bottom)
                 }
                 .overlay(alignment: .bottomTrailing) {
                     quickPoseVersionLabel
@@ -1516,9 +1552,10 @@ struct PoseDetectionView: View {
         }
     }
 
-    private func poseHUDOverlay(safeTop: CGFloat) -> some View {
-        HStack(alignment: .top, spacing: 10) {
+    private func poseHUDOverlay(safeTop: CGFloat, width: CGFloat) -> some View {
+        HStack(alignment: .top, spacing: 8) {
             poseStatusBadge
+                .frame(maxWidth: width * 0.5, alignment: .leading)
             Spacer(minLength: 8)
             Button {
                 showPhotosPicker = true
@@ -1531,6 +1568,7 @@ struct PoseDetectionView: View {
             .buttonStyle(.borderedProminent)
             .tint(.purple)
             .disabled(isLoadingVideo)
+            appMenuButton
         }
         .padding(.horizontal, 12)
         // GeometryReader 在 ignoresSafeArea 下 safeTop 可能是 0；右上角又是控制中心熱區。
@@ -1540,17 +1578,13 @@ struct PoseDetectionView: View {
 
     private var poseStatusBadge: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .center, spacing: 8) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(assessmentEngine.hudBadgeTitle)
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(assessmentEngine == .mediaPipe ? .mint : .orange)
-                    Text(modeStore.activity.coreTitle)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(modeStore.activity == .running ? .orange : .cyan)
-                }
-                Spacer(minLength: 4)
-                appMenuButton
+            VStack(alignment: .leading, spacing: 2) {
+                Text(assessmentEngine.hudBadgeTitle)
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(assessmentEngine == .mediaPipe ? .mint : .orange)
+                Text(modeStore.activity.coreTitle)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(modeStore.activity == .running ? .orange : .cyan)
             }
             Text(quickPoseEngine.fpsText)
                 .font(.system(size: 16, weight: .semibold, design: .rounded))
