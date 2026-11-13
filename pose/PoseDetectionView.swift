@@ -355,6 +355,7 @@ struct PoseDetectionView: View {
     @State private var showHistory = false
     @State private var showMemberProfile = false
     @State private var showAppMenu = false
+    @State private var showCoachingDetail = false
     @State private var lastSavedID: UUID?
     /// 本次偵測 session 是否已自動寫入歷史（避免重複儲存）。
     @State private var historySavedForSession = false
@@ -415,7 +416,7 @@ struct PoseDetectionView: View {
         }
     }
 
-    private let chromeBackground = Color(red: 0.12, green: 0.12, blue: 0.14)
+    private let chromeBackground = PoseChrome.canvas
 
     var body: some View {
         contentWithSheets
@@ -457,10 +458,48 @@ struct PoseDetectionView: View {
             .sheet(isPresented: $showAppMenu) {
                 appMenuSheetContent
             }
+            .sheet(isPresented: $showCoachingDetail) {
+                coachingDetailSheet
+            }
+    }
+
+    private var coachingDetailSheet: some View {
+        NavigationStack {
+            List {
+                Section(assessmentEngine.adviceSectionTitle) {
+                    ForEach(Array(quickPoseEngine.adviceLines.enumerated()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.body)
+                    }
+                }
+                Section("最近步態") {
+                    if quickPoseEngine.recentSteps.isEmpty {
+                        Text("尚無步數紀錄")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(quickPoseEngine.recentSteps.suffix(12).reversed()) { event in
+                            let interval = event.intervalFromPrevious.map { String(format: "+%.2fs", $0) } ?? "—"
+                            let bpm = event.cadenceBPM.map { String(format: "%.0f bpm", $0) } ?? "—"
+                            Text("第 \(event.index) 步 · \(event.side.localizedLabel)腳 · \(interval) · \(bpm)")
+                                .font(.subheadline.monospacedDigit())
+                        }
+                    }
+                }
+            }
+            .navigationTitle("即時建議")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("完成") { showCoachingDetail = false }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 
     private var appMenuSheetContent: some View {
         AppMenuSheet(
+            developerInfo: currentDeveloperInfo,
             onHistory: {
                 showAppMenu = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
@@ -481,6 +520,20 @@ struct PoseDetectionView: View {
         .environmentObject(auth)
         .environmentObject(modeStore)
         .presentationDetents([.medium, .large])
+    }
+
+    private var currentDeveloperInfo: PoseDeveloperInfo {
+        PoseDeveloperInfo(
+            engineTitle: assessmentEngine.hudBadgeTitle,
+            activityTitle: modeStore.activity.title,
+            realmFileName: assessmentEngine == .mediaPipe ? MediaPipeRealm.fileName : "pose.realm",
+            dbNodeCount: quickPoseEngine.dbNodeCount,
+            frameCallbackCount: quickPoseEngine.frameCallbackCount,
+            fpsText: quickPoseEngine.fpsText,
+            quickPoseVersion: quickPoseEngine.pose.quickPoseVersion(),
+            mediaPipeModelWeight: assessmentEngine == .mediaPipe ? quickPoseEngine.pose.modelWeight() : nil,
+            localVideoNote: "影片在手機本機分析，不需要 Railway。"
+        )
     }
 
     private var contentWithOverlays: some View {
@@ -597,7 +650,7 @@ struct PoseDetectionView: View {
         VStack(spacing: 20) {
             Text("Pose偵測")
                 .font(.title2.weight(.bold))
-                .foregroundStyle(.orange)
+                .foregroundStyle(PoseChrome.primaryText)
 
 #if targetEnvironment(simulator)
             Text("iOS 模擬器沒有相機，請用實機安裝此 App 才能測試相機授權與偵測。")
@@ -625,9 +678,9 @@ struct PoseDetectionView: View {
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding()
-                    .background(Color.accentColor)
-                    .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .background(PoseChrome.accent)
+                    .foregroundStyle(.black)
+                    .clipShape(RoundedRectangle(cornerRadius: PoseChrome.cardRadius, style: .continuous))
             }
             .padding(.horizontal, 32)
             .disabled(!Self.hasCameraUsageString)
@@ -643,249 +696,207 @@ struct PoseDetectionView: View {
                     UIApplication.shared.open(url)
                 }
             }
-            .foregroundStyle(.cyan)
+            .foregroundStyle(PoseChrome.accent)
 #endif
             videoImportButtons(primaryLabel: "或改為上傳影片偵測")
         }
     }
 
     @MainActor
-    private var stepEventList: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(quickPoseEngine.recentSteps.suffix(5).reversed()) { event in
-                let interval = event.intervalFromPrevious.map { String(format: "+%.2fs", $0) } ?? "—"
-                let bpm = event.cadenceBPM.map { String(format: "%.0f bpm", $0) } ?? "—"
-                let color: Color = event.side == .left ? .cyan : .pink
-                Text("第 \(event.index) 步  \(event.side.localizedLabel)腳   \(interval)   \(bpm)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(color)
+    private func videoImportButtons(primaryLabel: String) -> some View {
+        VStack(spacing: 8) {
+            Button {
+                showPhotosPicker = true
+            } label: {
+                Label(primaryLabel, systemImage: "film.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
             }
-        }
-    }
-
-    /// 底部固定高度區塊，避免偵測中文字變多時整片介面上下跳動。
-    @MainActor
-    private func bottomPanel(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            DetectionEnginePickerRow()
-            GaitActivityPickerRow()
-            bottomControls
+            .buttonStyle(.borderedProminent)
+            .tint(PoseChrome.accent)
+            .foregroundStyle(.black)
+            .disabled(isLoadingVideo)
 
             Button {
-                showDatabase = true
+                showFileImporter = true
             } label: {
-                Label("\(nodeDatabase.kind.buttonTitle)（本次 \(quickPoseEngine.dbNodeCount) 筆）", systemImage: "cylinder.split.1x2.fill")
+                Label("從檔案選擇", systemImage: "folder.fill")
                     .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
             }
             .buttonStyle(.bordered)
-            .tint(.teal)
-
-            Spacer(minLength: 0)
-
-            bottomAdviceSection
-            bottomStepsSection
+            .tint(.white)
+            .disabled(isLoadingVideo)
         }
-        .padding(12)
-        .padding(.bottom, safeBottom)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(height: panelHeight + safeBottom, alignment: .top)
-        .background(.black.opacity(0.65))
-        .animation(nil, value: quickPoseEngine.adviceLines.count)
+        .padding(.horizontal, 32)
+    }
+
+    /// 貼齊安全區的精簡控制面板：引擎／活動切換 + 核心操作列。
+    @MainActor
+    private func bottomPanel(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
+        VStack(spacing: PoseChrome.spacingSM) {
+            if case .video = detectionSource {
+                analyzeSummaryCapsule
+            }
+
+            PoseGlassCard {
+                VStack(spacing: PoseChrome.spacingSM) {
+                    DetectionEnginePickerRow()
+                    GaitActivityPickerRow()
+                    compactTransportRow
+                    coachingTicker
+                }
+            }
+        }
+        .padding(.horizontal, PoseChrome.spacingSM)
+        .padding(.bottom, max(safeBottom, 8))
+        .frame(maxWidth: .infinity, alignment: .bottom)
+        .frame(height: panelHeight + safeBottom, alignment: .bottom)
     }
 
     @MainActor
-    private var bottomAdviceSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(assessmentEngine.adviceSectionTitle)
-                .font(.headline)
-                .foregroundStyle(.white)
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(quickPoseEngine.adviceLines.enumerated()), id: \.offset) { _, line in
-                        Text("• \(line)")
-                            .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.95))
-                            .multilineTextAlignment(.leading)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
+    private var analyzeSummaryCapsule: some View {
+        Button {
+            PoseChrome.impact(.light)
+            analyzeVideoQualityAndShowSummary()
+        } label: {
+            HStack(spacing: 8) {
+                if isAnalyzingVideoQuality {
+                    ProgressView()
+                        .tint(PoseChrome.primaryText)
+                        .scaleEffect(0.85)
+                } else {
+                    Image(systemName: assessmentEngine.usesQualityPredict ? "sparkles" : "text.alignleft")
+                        .font(.caption.weight(.bold))
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                Text(assessmentEngine.usesQualityPredict ? "品質辨識與摘要" : "分析摘要")
+                    .font(.caption.weight(.bold))
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.up")
+                    .font(.caption2.weight(.bold))
+                    .opacity(0.7)
+            }
+            .foregroundStyle(PoseChrome.primaryText)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background {
+                Capsule(style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .background(Capsule(style: .continuous).fill(PoseChrome.glassFill))
             }
         }
-        .frame(height: 88, alignment: .top)
+        .buttonStyle(.plain)
+        .disabled(isAnalyzingVideoQuality || Self.sdkKeyIsPlaceholder)
+        .opacity(isAnalyzingVideoQuality || Self.sdkKeyIsPlaceholder ? 0.55 : 1)
     }
 
     @MainActor
-    private var bottomStepsSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Divider().background(.white.opacity(0.2))
-            Text("每一步")
-                .font(.headline)
-                .foregroundStyle(.white)
-            ScrollView(.vertical, showsIndicators: false) {
-                Group {
-                    if quickPoseEngine.recentSteps.isEmpty {
-                        Text("尚無步數紀錄")
-                            .font(.caption)
-                            .foregroundStyle(.white.opacity(0.45))
-                    } else {
-                        stepEventList
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+    private var compactTransportRow: some View {
+        HStack(alignment: .bottom, spacing: 10) {
+            PoseCircleIconButton(
+                systemImage: "film.fill",
+                label: videoPickerLabel,
+                isDisabled: isLoadingVideo
+            ) {
+                showPhotosPicker = true
             }
-        }
-        .frame(height: 100, alignment: .top)
-    }
 
-    @MainActor
-    @ViewBuilder
-    private var bottomControls: some View {
-        switch detectionSource {
-        case .liveCamera:
-            HStack(spacing: 10) {
-                Button {
-                    resumeDetectionFromUser()
-                } label: {
-                    Label("開始", systemImage: "play.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
-                .disabled(!isPaused || Self.sdkKeyIsPlaceholder || countdownSeconds != nil)
-
-                Button {
-                    pauseDetectionFromUser()
-                } label: {
-                    Label("暫停", systemImage: "pause.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.orange)
-                .disabled(isPaused || !engineAttached || Self.sdkKeyIsPlaceholder || countdownSeconds != nil)
+            PoseCircleIconButton(
+                systemImage: "folder.fill",
+                label: "檔案",
+                isDisabled: isLoadingVideo
+            ) {
+                showFileImporter = true
             }
-            videoImportButtons(primaryLabel: "上傳影片偵測")
 
-        case .video:
-            HStack(spacing: 10) {
-                Button {
-                    resumeDetectionFromUser()
-                } label: {
-                    Label("開始", systemImage: "play.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
-                .disabled(!isPaused || Self.sdkKeyIsPlaceholder || countdownSeconds != nil)
+            Spacer(minLength: 4)
 
-                Button {
-                    pauseDetectionFromUser()
-                } label: {
-                    Label("暫停", systemImage: "pause.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.orange)
-                .disabled(isPaused || !engineAttached || Self.sdkKeyIsPlaceholder || countdownSeconds != nil)
-            }
-            HStack(spacing: 10) {
-                Button {
-                    analyzeVideoQualityAndShowSummary()
-                } label: {
-                    HStack {
-                        if isAnalyzingVideoQuality { ProgressView().tint(.white) }
-                        Label(
-                            assessmentEngine.usesQualityPredict ? "品質辨識與摘要" : "分析摘要",
-                            systemImage: assessmentEngine.usesQualityPredict ? "brain.head.profile" : "text.alignleft"
-                        )
-                            .font(.subheadline.weight(.semibold))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.indigo)
-                .disabled(isAnalyzingVideoQuality || Self.sdkKeyIsPlaceholder)
+            playPausePrimaryButton
 
-                Button {
+            Spacer(minLength: 4)
+
+            if case .video = detectionSource {
+                PoseCircleIconButton(systemImage: "camera.fill", label: "相機") {
                     switchBackToCamera()
-                } label: {
-                    Label("回到相機", systemImage: "camera.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.gray)
+            } else {
+                PoseCircleIconButton(systemImage: "camera.fill", label: "相機", isDisabled: true) {}
             }
-            videoImportButtons(primaryLabel: "重新選擇影片")
+
+            PoseCircleIconButton(systemImage: "cylinder.split.1x2.fill", label: "資料庫") {
+                showDatabase = true
+            }
         }
+    }
+
+    private var videoPickerLabel: String {
+        if case .video = detectionSource { return "重選" }
+        return "影片"
+    }
+
+    @MainActor
+    private var playPausePrimaryButton: some View {
+        let canResume = isPaused && !Self.sdkKeyIsPlaceholder && countdownSeconds == nil
+        let canPause = !isPaused && engineAttached && !Self.sdkKeyIsPlaceholder && countdownSeconds == nil
+        return PoseCircleIconButton(
+            systemImage: isPaused ? "play.fill" : "pause.fill",
+            label: isPaused ? "開始" : "暫停",
+            isProminent: true,
+            isDisabled: isPaused ? !canResume : !canPause
+        ) {
+            withAnimation(PoseChrome.controlSpring) {
+                if isPaused {
+                    resumeDetectionFromUser()
+                } else {
+                    pauseDetectionFromUser()
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private var coachingTicker: some View {
+        Button {
+            PoseChrome.impact(.light)
+            showCoachingDetail = true
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "lightbulb.fill")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(PoseChrome.accent)
+                Text(quickPoseEngine.adviceLines.first ?? "偵測建議會顯示在這裡")
+                    .font(.caption)
+                    .foregroundStyle(PoseChrome.primaryText.opacity(0.9))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(PoseChrome.label)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(PoseChrome.secondaryFill, in: RoundedRectangle(cornerRadius: PoseChrome.capsuleRadius, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 
     @MainActor
     private var appMenuButton: some View {
         Button {
+            PoseChrome.impact(.light)
             showAppMenu = true
         } label: {
-            Image(systemName: "line.3.horizontal.circle.fill")
-                .font(.title2)
-                .foregroundStyle(.white)
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
+            Image(systemName: "line.3.horizontal")
+                .font(.body.weight(.bold))
+                .foregroundStyle(PoseChrome.primaryText)
+                .frame(width: 40, height: 40)
+                .background(PoseChrome.secondaryFill, in: Circle())
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
         }
         .buttonStyle(.plain)
         .accessibilityLabel("選單")
-    }
-
-    @MainActor
-    @ViewBuilder
-    private func videoImportButtons(primaryLabel: String) -> some View {
-        VStack(spacing: 8) {
-            Text("影片在手機本機分析，不需要 Railway")
-                .font(.caption2)
-                .foregroundStyle(.white.opacity(0.7))
-                .frame(maxWidth: .infinity, alignment: .leading)
-            HStack(spacing: 10) {
-                Button {
-                    showPhotosPicker = true
-                } label: {
-                    HStack(spacing: 8) {
-                        if isLoadingVideo {
-                            ProgressView().tint(.white)
-                        }
-                        Label(primaryLabel, systemImage: "film.fill")
-                            .font(.subheadline.weight(.semibold))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.purple)
-                .disabled(isLoadingVideo)
-
-                Button {
-                    showFileImporter = true
-                } label: {
-                    Label("檔案", systemImage: "folder.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                }
-                .buttonStyle(.bordered)
-                .tint(.purple)
-                .disabled(isLoadingVideo)
-            }
-        }
     }
 
     @MainActor
@@ -1193,7 +1204,7 @@ struct PoseDetectionView: View {
             VStack(spacing: 16) {
                 Image(systemName: "film.stack")
                     .font(.system(size: 44))
-                    .foregroundStyle(.purple)
+                    .foregroundStyle(PoseChrome.accent)
                 Text("確認分析這支影片")
                     .font(.title3.weight(.bold))
                     .foregroundStyle(.white)
@@ -1218,7 +1229,7 @@ struct PoseDetectionView: View {
                             .padding(.vertical, 10)
                     }
                     .buttonStyle(.bordered)
-                    .tint(.gray)
+                    .tint(.white)
 
                     Button {
                         confirmPendingVideo()
@@ -1229,13 +1240,14 @@ struct PoseDetectionView: View {
                             .padding(.vertical, 10)
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(.green)
+                    .tint(PoseChrome.accent)
+                    .foregroundStyle(.black)
                 }
                 .padding(.horizontal)
             }
             .padding(.vertical, 24)
             .frame(maxWidth: 360)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: PoseChrome.cardRadius, style: .continuous))
             .padding(28)
         }
         .transition(.opacity)
@@ -1318,6 +1330,8 @@ struct PoseDetectionView: View {
                 }
             }
             .buttonStyle(.borderedProminent)
+            .tint(PoseChrome.accent)
+            .foregroundStyle(.black)
             videoImportButtons(primaryLabel: "或改為上傳影片偵測")
         }
     }
@@ -1364,7 +1378,7 @@ struct PoseDetectionView: View {
         GeometryReader { geometry in
             let w = max(geometry.size.width, 1)
             let h = max(geometry.size.height, 1)
-            let bottomPanelHeight = cameraBottomPanelHeight(for: h)
+            let bottomPanelHeight = cameraBottomPanelHeight(for: detectionSource)
 
             cameraPreviewStack(width: w, height: h)
                 .overlay(alignment: .top) {
@@ -1376,20 +1390,19 @@ struct PoseDetectionView: View {
                 .overlay(alignment: .bottom) {
                     bottomPanel(height: bottomPanelHeight, safeBottom: geometry.safeAreaInsets.bottom)
                 }
-                .overlay(alignment: .bottomTrailing) {
-                    quickPoseVersionLabel
-                }
         }
     }
 
-    private func cameraBottomPanelHeight(for height: CGFloat) -> CGFloat {
-        let ratio: CGFloat = {
-            switch detectionSource {
-            case .video: return 0.50
-            case .liveCamera: return 0.46
-            }
-        }()
-        return min(max(height * ratio, 370), 500)
+    private func cameraBottomPanelHeight(for source: DetectionSource) -> CGFloat {
+        // 控制列精簡後僅保留安全區上方一小段，釋放跑者畫面。
+        switch source {
+        case .video: return 188
+        case .liveCamera: return 168
+        }
+    }
+
+    private var hasVisibleSkeletonNodes: Bool {
+        quickPoseEngine.previewNodes.contains(where: MediaPipeSkeletonGraph.isVisible)
     }
 
     @ViewBuilder
@@ -1397,19 +1410,19 @@ struct PoseDetectionView: View {
         ZStack(alignment: .top) {
             cameraSourceView(width: w, height: h)
 
+            // 有自繪骨架時隱藏 SDK 青色粗線，改用專業動作捕捉樣式。
             QuickPoseOverlayView(overlayImage: $quickPoseEngine.overlayImage, contentMode: .fill)
                 .frame(width: w, height: h)
-                .opacity(quickPoseEngine.overlayImage == nil ? 0 : 1)
+                .opacity(quickPoseEngine.overlayImage == nil || hasVisibleSkeletonNodes ? 0 : 1)
                 .allowsHitTesting(false)
 
-            if assessmentEngine == .mediaPipe {
-                MediaPipeSkeletonOverlay(
-                    nodes: quickPoseEngine.previewNodes,
-                    flipHorizontally: skeletonFlipsHorizontally
-                )
-                .frame(width: w, height: h)
-                .allowsHitTesting(false)
-            }
+            MediaPipeSkeletonOverlay(
+                nodes: quickPoseEngine.previewNodes,
+                flipHorizontally: skeletonFlipsHorizontally
+            )
+            .frame(width: w, height: h)
+            .opacity(hasVisibleSkeletonNodes ? 1 : 0)
+            .allowsHitTesting(false)
         }
         .id(cameraContentID)
         .frame(width: w, height: h)
@@ -1440,10 +1453,10 @@ struct PoseDetectionView: View {
 
     @ViewBuilder
     private func stepFlashOverlay(safeTop: CGFloat) -> some View {
-        if let side = stepFlashSide {
+        if stepFlashSide != nil {
             Rectangle()
-                .fill(side == .left ? Color.cyan : Color.pink)
-                .frame(height: 6)
+                .fill(PoseChrome.accent)
+                .frame(height: 3)
                 .opacity(stepFlashOpacity)
                 .padding(.top, safeTop)
                 .allowsHitTesting(false)
@@ -1451,103 +1464,103 @@ struct PoseDetectionView: View {
     }
 
     private func poseHUDOverlay(safeTop: CGFloat) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            poseStatusBadge
-            Spacer(minLength: 8)
-            Button {
-                showPhotosPicker = true
-            } label: {
-                Label("選影片", systemImage: "film.fill")
-                    .font(.caption.weight(.bold))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
+        VStack(alignment: .trailing, spacing: PoseChrome.spacingXS) {
+            HStack(alignment: .top, spacing: PoseChrome.spacingSM) {
+                poseStatsCard
+                appMenuButton
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.purple)
-            .disabled(isLoadingVideo)
+            fpsMicroBadge
         }
-        .padding(.horizontal, 12)
-        // GeometryReader 在 ignoresSafeArea 下 safeTop 可能是 0；右上角又是控制中心熱區。
+        .padding(.horizontal, PoseChrome.spacingSM)
+        // GeometryReader 在 ignoresSafeArea 下 safeTop 可能是 0；避開控制中心熱區。
         .padding(.top, max(safeTop, 54) + 6)
         .zIndex(2)
     }
 
-    private var poseStatusBadge: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .center, spacing: 8) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(assessmentEngine.hudBadgeTitle)
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(assessmentEngine == .mediaPipe ? .mint : .orange)
-                    Text(modeStore.activity.coreTitle)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(modeStore.activity == .running ? .orange : .cyan)
+    private var poseStatsCard: some View {
+        PoseGlassCard {
+            VStack(alignment: .leading, spacing: PoseChrome.spacingSM) {
+                HStack {
+                    Text(modeStore.activity.title.uppercased())
+                        .font(.system(size: 10, weight: .bold))
+                        .tracking(0.8)
+                        .foregroundStyle(PoseChrome.label)
+                    Spacer(minLength: 0)
+                    if !quickPoseEngine.statusHint.isEmpty {
+                        Text(quickPoseEngine.statusHint)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(PoseChrome.label)
+                            .lineLimit(1)
+                    }
                 }
-                Spacer(minLength: 4)
-                appMenuButton
+
+                HStack(alignment: .top, spacing: PoseChrome.spacingSM) {
+                    PoseStatCell(
+                        title: "CADENCE",
+                        value: cadenceDisplayValue,
+                        subtitle: "bpm"
+                    )
+                    PoseStatCell(
+                        title: "STEPS",
+                        value: "\(analysisPipeline.totalSteps)",
+                        subtitle: "L \(analysisPipeline.leftSteps) / R \(analysisPipeline.rightSteps)"
+                    )
+                    PoseStatCell(
+                        title: "QUALITY",
+                        value: qualityDisplayValue,
+                        badge: qualityBadgeLabel
+                    )
+                }
             }
-            Text(quickPoseEngine.fpsText)
-                .font(.system(size: 16, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white)
-            if !quickPoseEngine.statusHint.isEmpty {
-                Text(quickPoseEngine.statusHint)
-                    .font(.caption)
-                    .foregroundStyle(.yellow)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Text(quickPoseEngine.stepHUD)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.mint)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("資料庫節點：\(quickPoseEngine.dbNodeCount)")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.teal)
-            if assessmentEngine == .mediaPipe {
-                Text("寫入 \(MediaPipeRealm.fileName)")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.mint)
-            }
-            if quickPoseEngine.loopActive, quickPoseEngine.frameCallbackCount == 0 {
-                Text("等待第一幀…")
-                    .font(.caption2)
-                    .foregroundStyle(.yellow)
-            } else if quickPoseEngine.frameCallbackCount > 0 {
-                Text("引擎回呼 \(quickPoseEngine.frameCallbackCount) 次")
-                    .font(.caption2)
-                    .foregroundStyle(.green.opacity(0.85))
-            }
-            qualityBadgeIfNeeded
         }
-        .padding(8)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    @ViewBuilder
-    private var qualityBadgeIfNeeded: some View {
-        if case .video = detectionSource {
-            Text(assessmentEngine == .mediaPipe ? "MediaPipe 影片偵測中" : "影片偵測中")
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(.purple)
-            if assessmentEngine.usesQualityPredict, let result = videoQualityResult ?? livePrediction {
-                videoQualityBadge(result, compact: true)
-            }
-        } else if assessmentEngine.usesQualityPredict, let pred = livePrediction {
-            videoQualityBadge(pred, compact: true)
+    private var cadenceDisplayValue: String {
+        if let bpm = analysisPipeline.avgCadenceBPM {
+            return String(format: "%.0f", bpm)
         }
+        return "—"
     }
 
-    private var quickPoseVersionLabel: some View {
-        VStack(alignment: .trailing, spacing: 2) {
-            if assessmentEngine == .mediaPipe {
-                Text("MediaPipe \(quickPoseEngine.pose.modelWeight())")
-                    .font(.caption2)
-                    .foregroundStyle(.mint.opacity(0.9))
-            }
-            Text("QuickPose v\(quickPoseEngine.pose.quickPoseVersion())")
-                .font(.caption2)
-                .foregroundStyle(.white.opacity(0.7))
+    private var activeQualityPrediction: LivePrediction? {
+        if assessmentEngine.usesQualityPredict {
+            return videoQualityResult ?? livePrediction
         }
-        .padding(8)
+        return nil
+    }
+
+    private var qualityDisplayValue: String {
+        guard let pred = activeQualityPrediction, pred.note == nil, pred.label != nil else {
+            return "—"
+        }
+        return "\(Int(pred.confidencePercent))%"
+    }
+
+    private var qualityBadgeLabel: String? {
+        guard let pred = activeQualityPrediction, pred.note == nil, pred.label != nil else {
+            return nil
+        }
+        return pred.qualityTitle
+    }
+
+    private var fpsMicroBadge: some View {
+        Text(compactFPSLabel)
+            .font(.system(size: 10, weight: .bold, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(PoseChrome.primaryText.opacity(0.8))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(PoseChrome.glassFill, in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
+    }
+
+    private var compactFPSLabel: String {
+        let raw = quickPoseEngine.fpsText
+        if let range = raw.range(of: #"\d+"#, options: .regularExpression) {
+            return "FPS \(raw[range])"
+        }
+        return "FPS —"
     }
 
     // MARK: - QuickPose
@@ -1683,14 +1696,14 @@ struct PoseDetectionView: View {
         if let note = result.note {
             Text(compact ? "品質：\(note)" : note)
                 .font(compact ? .caption.weight(.semibold) : .body)
-                .foregroundStyle(.yellow)
+                .foregroundStyle(PoseChrome.label)
         } else if let label = result.label {
             let isGood = label == "good"
             let pct = Int(result.confidencePercent)
             if compact {
                 Text("品質：\(isGood ? "好" : "壞") \(pct)%")
                     .font(.caption.weight(.bold))
-                    .foregroundStyle(isGood ? .green : .red)
+                    .foregroundStyle(isGood ? PoseChrome.accent : .red)
             } else {
                 HStack(spacing: 8) {
                     Image(systemName: isGood ? "hand.thumbsup.fill" : "hand.thumbsdown.fill")
@@ -1699,7 +1712,7 @@ struct PoseDetectionView: View {
                     Text("\(pct)%")
                         .font(.title3.weight(.semibold))
                 }
-                .foregroundStyle(isGood ? .green : .red)
+                .foregroundStyle(isGood ? PoseChrome.accent : .red)
             }
         }
     }
@@ -1743,7 +1756,7 @@ private struct VideoSummarySheet: View {
                     if autoSaved {
                         Label("已自動存入歷史紀錄", systemImage: "checkmark.seal.fill")
                             .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.green)
+                            .foregroundStyle(PoseChrome.accent)
                             .padding(.vertical, 4)
                     }
 
@@ -1754,7 +1767,7 @@ private struct VideoSummarySheet: View {
                     ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(.indigo)
+                                .foregroundStyle(PoseChrome.accent)
                             Text(line)
                                 .font(.body)
                                 .multilineTextAlignment(.leading)
@@ -1775,7 +1788,8 @@ private struct VideoSummarySheet: View {
                             .padding(.vertical, 10)
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(.indigo)
+                    .tint(PoseChrome.accent)
+                    .foregroundStyle(.black)
                     .padding(.top, 6)
                 }
                 .padding(20)
@@ -1807,17 +1821,17 @@ private struct VideoSummarySheet: View {
                 if let note = result.note {
                     Label(note, systemImage: "exclamationmark.triangle.fill")
                         .font(.subheadline)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(PoseChrome.label)
                 } else if let label = result.label {
                     let isGood = label == "good"
                     HStack(spacing: 16) {
                         Image(systemName: isGood ? "checkmark.seal.fill" : "xmark.seal.fill")
                             .font(.system(size: 44))
-                            .foregroundStyle(isGood ? .green : .red)
+                            .foregroundStyle(isGood ? PoseChrome.accent : .red)
                         VStack(alignment: .leading, spacing: 4) {
                             Text(isGood ? "姿勢：好" : "姿勢：壞")
                                 .font(.title.weight(.bold))
-                                .foregroundStyle(isGood ? .green : .red)
+                                .foregroundStyle(isGood ? PoseChrome.accent : .red)
                             Text(String(format: "模型信心度：%.0f%%", result.confidencePercent))
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
@@ -1832,7 +1846,7 @@ private struct VideoSummarySheet: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: PoseChrome.cardRadius, style: .continuous))
     }
 }
 
@@ -1928,8 +1942,8 @@ private struct SummaryHistorySheet: View {
                 Divider()
                 ForEach(Array(item.lines.enumerated()), id: \.offset) { _, line in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.indigo)
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(PoseChrome.accent)
                         Text(line)
                             .font(.body)
                             .fixedSize(horizontal: false, vertical: true)

@@ -66,13 +66,14 @@ private struct EngineChooserSheet: View {
                 Section {
                     ForEach(PoseAssessmentEngine.allCases) { engine in
                         Button {
+                            PoseChrome.impact(.light)
                             modeStore.engine = engine
                             onDone()
                         } label: {
                             HStack(spacing: 12) {
                                 Image(systemName: engine.systemImage)
                                     .font(.title3)
-                                    .foregroundStyle(engine == .mediaPipe ? Color.mint : Color.accentColor)
+                                    .foregroundStyle(PoseChrome.accent)
                                     .frame(width: 32)
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(engine.title)
@@ -85,7 +86,7 @@ private struct EngineChooserSheet: View {
                                 Spacer()
                                 if modeStore.engine == engine {
                                     Image(systemName: "checkmark.circle.fill")
-                                        .foregroundStyle(Color.accentColor)
+                                        .foregroundStyle(PoseChrome.accent)
                                 }
                             }
                         }
@@ -108,48 +109,21 @@ private struct EngineChooserSheet: View {
     }
 }
 
-// MARK: - 共用：偵測引擎切換（底部／選單）
+// MARK: - 共用：偵測引擎／活動緊湊切換列
 
 struct DetectionEnginePickerRow: View {
     @EnvironmentObject private var modeStore: DetectionModeStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("偵測引擎")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.75))
-            HStack(spacing: 6) {
-                ForEach(PoseAssessmentEngine.allCases) { engine in
-                    let selected = modeStore.engine == engine
-                    Button {
-                        modeStore.engine = engine
-                    } label: {
-                        VStack(spacing: 4) {
-                            Image(systemName: engine.systemImage)
-                                .font(.body.weight(.semibold))
-                            Text(engine.title)
-                                .font(.caption.weight(.bold))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.75)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(selected ? engineTint(engine) : .gray)
-                    .accessibilityLabel(engine.title)
-                    .accessibilityAddTraits(selected ? .isSelected : [])
-                }
-            }
-        }
-    }
-
-    private func engineTint(_ engine: PoseAssessmentEngine) -> Color {
-        switch engine {
-        case .quickPose: return .cyan
-        case .mediaPipe: return .mint
-        case .trainedModel: return .indigo
-        }
+        PoseSegmentChipRow(
+            options: PoseAssessmentEngine.allCases,
+            selection: Binding(
+                get: { modeStore.engine },
+                set: { modeStore.engine = $0 }
+            ),
+            title: { $0.title },
+            systemImage: { $0.systemImage }
+        )
     }
 }
 
@@ -157,32 +131,15 @@ struct GaitActivityPickerRow: View {
     @EnvironmentObject private var modeStore: DetectionModeStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("活動")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.75))
-            HStack(spacing: 6) {
-                ForEach(GaitActivityMode.allCases) { mode in
-                    let selected = modeStore.activity == mode
-                    Button {
-                        modeStore.activity = mode
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: mode.systemImage)
-                                .font(.caption.weight(.semibold))
-                            Text(mode.title)
-                                .font(.caption.weight(.bold))
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(selected ? (mode == .running ? .orange : .cyan) : .gray)
-                    .accessibilityLabel(mode.title)
-                    .accessibilityAddTraits(selected ? .isSelected : [])
-                }
-            }
-        }
+        PoseSegmentChipRow(
+            options: GaitActivityMode.allCases,
+            selection: Binding(
+                get: { modeStore.activity },
+                set: { modeStore.activity = $0 }
+            ),
+            title: { $0.title },
+            systemImage: { $0.systemImage }
+        )
     }
 }
 

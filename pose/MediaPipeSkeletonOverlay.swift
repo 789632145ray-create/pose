@@ -2,7 +2,7 @@
 //  MediaPipeSkeletonOverlay.swift
 //  pose
 //
-//  用目前幀的關節座標畫 MediaPipe 風格節點與連線。
+//  用目前幀的關節座標畫專業動作捕捉風格節點與連線。
 //  QuickPose 的 overlay 圖在切換引擎後可能空白；這層不依賴那張圖。
 //
 
@@ -71,12 +71,14 @@ enum MediaPipeSkeletonGraph {
 struct MediaPipeSkeletonOverlay: View {
     let nodes: [PoseNode]
     var flipHorizontally: Bool
+    /// 線寬約 2~2.5；關節為白實心＋強調色外框。
+    var lineWidth: CGFloat = 2.25
 
     var body: some View {
         Canvas { context, size in
             let byName = MediaPipeSkeletonGraph.indexed(nodes)
-            let lineColor = Color.mint
-            let pointColor = Color.white
+            let accent = PoseChrome.accent
+            let glow = accent.opacity(0.35)
 
             for (a, b) in MediaPipeSkeletonGraph.connections {
                 guard let na = byName[a], let nb = byName[b],
@@ -86,15 +88,19 @@ struct MediaPipeSkeletonOverlay: View {
                 var path = Path()
                 path.move(to: point(na, in: size))
                 path.addLine(to: point(nb, in: size))
-                context.stroke(path, with: .color(lineColor), lineWidth: 3)
+                // 微弱外發光提升對比，再疊一層清晰主線。
+                context.stroke(path, with: .color(glow), lineWidth: lineWidth + 2.5)
+                context.stroke(path, with: .color(accent.opacity(0.92)), lineWidth: lineWidth)
             }
 
             for node in nodes where MediaPipeSkeletonGraph.isVisible(node) {
                 let p = point(node, in: size)
-                let r: CGFloat = 4
+                let r: CGFloat = 3.5
                 let rect = CGRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2)
-                context.fill(Path(ellipseIn: rect), with: .color(pointColor))
-                context.stroke(Path(ellipseIn: rect), with: .color(lineColor), lineWidth: 1.5)
+                let glowRect = rect.insetBy(dx: -1.5, dy: -1.5)
+                context.fill(Path(ellipseIn: glowRect), with: .color(glow))
+                context.fill(Path(ellipseIn: rect), with: .color(.white))
+                context.stroke(Path(ellipseIn: rect), with: .color(accent), lineWidth: 1.5)
             }
         }
         .allowsHitTesting(false)
