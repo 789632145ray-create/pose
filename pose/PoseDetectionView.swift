@@ -1416,6 +1416,11 @@ struct PoseDetectionView: View {
             let w = max(geometry.size.width, 1)
             let h = max(geometry.size.height, 1)
             let bottomPanelHeight = cameraBottomPanelHeight(for: h)
+            let safeBottom = geometry.safeAreaInsets.bottom
+            // 隱藏鈕獨立浮在選單上方，避免被高大底部面板往上頂出畫面。
+            let hideButtonBottomPadding: CGFloat = isBottomPanelHidden
+                ? max(safeBottom, 12) + 8
+                : bottomPanelHeight + safeBottom + 10
 
             cameraPreviewStack(width: w, height: h)
                 .overlay(alignment: .top) {
@@ -1425,30 +1430,25 @@ struct PoseDetectionView: View {
                     poseHUDOverlay(safeTop: geometry.safeAreaInsets.top)
                 }
                 .overlay(alignment: .bottom) {
-                    bottomChrome(height: bottomPanelHeight, safeBottom: geometry.safeAreaInsets.bottom)
+                    Group {
+                        if !isBottomPanelHidden {
+                            bottomPanel(height: bottomPanelHeight, safeBottom: safeBottom)
+                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                        }
+                    }
+                    .animation(.easeInOut(duration: 0.25), value: isBottomPanelHidden)
+                }
+                .overlay(alignment: .bottom) {
+                    bottomPanelToggle
+                        .padding(.bottom, hideButtonBottomPadding)
+                        .frame(maxWidth: .infinity)
+                        .zIndex(5)
                 }
                 .overlay(alignment: .bottomTrailing) {
                     quickPoseVersionLabel
                         .padding(.bottom, isBottomPanelHidden ? 36 : 0)
                 }
         }
-    }
-
-    /// 底部控制區與收合按鈕。點「隱藏」可收起偵測引擎／模型選單，露出更多骨架畫面。
-    @MainActor
-    private func bottomChrome(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
-        VStack(spacing: 8) {
-            bottomPanelToggle
-                .zIndex(2)
-
-            if !isBottomPanelHidden {
-                bottomPanel(height: panelHeight, safeBottom: safeBottom)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.bottom, isBottomPanelHidden ? max(safeBottom, 10) : 0)
-        .animation(.easeInOut(duration: 0.25), value: isBottomPanelHidden)
     }
 
     @MainActor
@@ -1468,8 +1468,9 @@ struct PoseDetectionView: View {
             .foregroundStyle(.white)
             .padding(.horizontal, 14)
             .padding(.vertical, 9)
-            .background(.black.opacity(0.78), in: Capsule())
-            .overlay(Capsule().strokeBorder(Color.white.opacity(0.22), lineWidth: 1))
+            .background(.black.opacity(0.82), in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.28), lineWidth: 1))
+            .shadow(color: .black.opacity(0.35), radius: 6, y: 2)
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -1484,8 +1485,8 @@ struct PoseDetectionView: View {
             case .liveCamera: return 0.46
             }
         }()
-        // 多一列「骨架模型」切換，略提高下限以免控制列被裁切。
-        return min(max(height * ratio, 410), 520)
+        // 多一列「骨架模型」；上限略降，留給上方「隱藏」鈕可見空間。
+        return min(max(height * ratio, 380), 480)
     }
 
     @ViewBuilder
