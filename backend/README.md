@@ -121,10 +121,19 @@ python train.py --engine mediapipe --from-json mediapipe_training_export.json
 ```
 
 - MediaPipe 會讀 `mediapipe_sessions`，以及回退寫進 `pose_sessions` 且 `engine=mediapipe` 的資料。
-- 特徵：每個 session 的 35 個關節在所有影格的 (x,y,z) 平均與標準差（共 210 維）。
+- 特徵：每個 session 的 35 個關節在所有影格的 (x,y,z) 平均與標準差（共 210 維）；**無** StandardScaler／額外 Normalization。train 與 `/predict` 共用 `train.session_features`。
 - 模型：RandomForest 二元分類（good / bad）。
 - 樣本太少或只有單一標籤時會提示先補資料（建議好、壞各至少數筆）。
 - 訓練後重啟後端；App 的 MediaPipe 引擎會呼叫 `POST /mediapipe/predict`。
+
+### 信心分數偏低時的診斷
+
+```bash
+python diagnose_quality_model.py
+python diagnose_quality_model.py --engine mediapipe --from-json mediapipe_training_export.json
+```
+
+會依序檢查：(1) train／inference 前處理是否一致、(2) Labels 數量比例、(3) 取 10 筆做 MLP 100 Epochs 過擬合（目標信心 ≥ 0.99）。線上仍是 RandomForest；Epoch 檢查只用來排除特徵／Loss 寫錯。
 
 ## 6. 正式環境注意
 

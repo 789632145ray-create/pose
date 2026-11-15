@@ -57,12 +57,18 @@ PER_SIDE = [
 ]
 JOINTS = ["nose", "shoulder_mid", "hip_mid"] + [f"{s}_{p}" for s in SIDES for p in PER_SIDE]
 
-# 每個關節的特徵欄位：x/y/z 的平均與標準差。
-FEATURE_COLUMNS = [f"{j}_{stat}_{axis}" for j in JOINTS for stat in ("mean", "std") for axis in ("x", "y", "z")]
+# 每個關節實際向量順序：mean_x, std_x, mean_y, std_y, mean_z, std_z（無額外 Normalization／Scaler）。
+# 名稱必須與 session_features 輸出 100% 對齊；train /predict 共用同一函式。
+FEATURE_COLUMNS = [
+    f"{j}_{stat}_{axis}"
+    for j in JOINTS
+    for axis in ("x", "y", "z")
+    for stat in ("mean", "std")
+]
 
 
 def session_features(doc: dict) -> list[float] | None:
-    """把一個 session 的多幀節點壓成固定長度特徵向量。"""
+    """把一個 session 的多幀節點壓成固定長度特徵向量（train／inference 共用）。"""
     frames = doc.get("frames", [])
     if not frames:
         return None
@@ -72,15 +78,70 @@ def session_features(doc: dict) -> list[float] | None:
         for node in frame.get("nodes", []):
             joint = node.get("joint")
             if joint in acc:
-                acc[joint].append((node["x"], node["y"], node["z"]))
+                # 只用原始 x/y/z；visibility／presence 不進特徵（與推論一致）。
+                acc[joint].append((float(node["x"]), float(node["y"]), float(node["z"])))
 
     feats: list[float] = []
     for joint in JOINTS:
         arr = np.array(acc[joint], dtype=float) if acc[joint] else np.zeros((1, 3))
         mean = arr.mean(axis=0)
         std = arr.std(axis=0)
-        feats.extend([mean[0], std[0], mean[1], std[1], mean[2], std[2]])
+        # 與 FEATURE_COLUMNS 相同迴圈順序：axis 外層、mean/std 內層。
+        for axis_idx in range(3):
+            feats.append(float(mean[axis_idx]))
+            feats.append(float(std[axis_idx]))
     return feats
+
+
+def feature_layout_report() -> dict:
+    """回傳特徵配置摘要，供診斷腳本比對 train／inference。"""
+    return {
+        "joints": list(JOINTS),
+        "feature_columns": list(FEATURE_COLUMNS),
+        "feature_dim": len(FEATURE_COLUMNS),
+        "per_joint_layout": ["mean_x", "std_x", "mean_y", "std_y", "mean_z", "std_z"],
+        "normalization": "none",
+        "scaling": "none",
+        "uses_visibility": False,
+        "missing_joint_fill": "zeros(1,3) → mean/std of single zero row",
+    }
+
+
+def label_class_ratios(y: np.ndarray) -> dict[str, dict[str, float | int]]:
+    """計算 good／bad 標籤數量與比例。"""
+    total = int(len(y))
+    n_good = int((y == 1).sum()) if total else 0
+    n_bad = int((y == 0).sum()) if total else 0
+    return {
+        "good": {
+            "count": n_good,
+            "ratio": (n_good / total) if total else 0.0,
+        },
+        "bad": {
+            "count": n_bad,
+            "ratio": (n_bad / total) if total else 0.0,
+        },
+        "total": {"count": total, "ratio": 1.0 if total else 0.0},
+    }
+
+
+def print_label_class_ratios(y: np.ndarray) -> dict[str, dict[str, float | int]]:
+    stats = label_class_ratios(y)
+    total = int(stats["total"]["count"])
+    print("標籤分佈（Labels）：")
+    if total == 0:
+        print("  （無已標註樣本）")
+        return stats
+    for name in ("good", "bad"):
+        count = int(stats[name]["count"])
+        ratio = float(stats[name]["ratio"])
+        print(f"  {name}: {count} 筆（{ratio * 100:.1f}%）")
+    imbalance = abs(float(stats["good"]["ratio"]) - float(stats["bad"]["ratio"]))
+    if total >= 4 and imbalance >= 0.6:
+        print("  警告：類別嚴重不平衡（差距 ≥ 60%），模型信心分數容易偏向多數類。")
+    elif total >= 4 and min(int(stats["good"]["count"]), int(stats["bad"]["count"])) <= 2:
+        print("  警告：少數類樣本過少，測試／信心分數會不穩定。")
+    return stats
 
 
 def is_mediapipe_training_doc(doc: dict) -> bool:
@@ -327,7 +388,8 @@ def main(argv: list[str] | None = None) -> int:
         except RuntimeError as exc:
             print(exc)
             return 1
-    print(f"載入樣本數：{len(X)}（good={int((y == 1).sum()) if len(y) else 0}, bad={int((y == 0).sum()) if len(y) else 0}）")
+    print(f"載入樣本數：{len(X)}")
+    print_label_class_ratios(y)
 
     if args.export and len(X) > 0:
         export_csv(X, y, out_csv)
