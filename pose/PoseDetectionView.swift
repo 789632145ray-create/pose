@@ -2193,13 +2193,15 @@ private struct PoseDatabaseSheet: View {
     @EnvironmentObject private var auth: AuthManager
     @State private var records: [PoseSessionRecord] = []
     @State private var totalNodes: Int = 0
+    @State private var labeledCount: Int = 0
+    @State private var uploadedCount: Int = 0
+    @State private var isLoading = false
+    @State private var isExporting = false
+    @State private var exportProgress: Double = 0
+    @State private var exportStatus: String = ""
     @State private var exportURL: URL?
     @State private var exportError: String?
     @State private var didCopyCloudCommand = false
-
-    private var labeledCount: Int {
-        records.filter { $0.trainingLabel == "good" || $0.trainingLabel == "bad" }.count
-    }
 
     private var cloudDiagnoseCommand: String {
         let engine = database.kind == .mediaPipe ? "mediapipe" : "pose"
@@ -2246,12 +2248,19 @@ private struct PoseDatabaseSheet: View {
                 } else {
                     List {
                         Section {
+                            if isLoading {
+                                ProgressView("載入本機清單…")
+                            }
                             LabeledContent("偵測次數", value: "\(records.count)")
-                            LabeledContent("節點總筆數", value: "\(totalNodes)")
+                            LabeledContent("節點約略筆數", value: "\(totalNodes)")
                             LabeledContent("本機已標註", value: "\(labeledCount) 筆")
+                            LabeledContent("已上傳雲端", value: "\(uploadedCount) 筆")
                             LabeledContent("本機檔案", value: database.fileURL.lastPathComponent)
                         } header: {
                             Text("總覽")
+                        } footer: {
+                            Text("已上傳雲端的標註刪 App 也不會丟；沒上傳成功的只在本機。匯出請等進度跑完，不要強制關閉。")
+                                .font(.caption2)
                         }
 
                         Section {
@@ -2317,15 +2326,36 @@ private struct PoseDatabaseSheet: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     HStack(spacing: 12) {
-                        Button("匯出 JSON") {
-                            do {
-                                exportError = nil
-                                exportURL = try database.exportLabeledTrainingJSON()
-                            } catch {
-                                exportError = error.localizedDescription
+                        if isExporting {
+                            ProgressView()
+                        } else {
+                            Button("匯出 JSON") {
+                                startExport()
                             }
+                            .disabled(isLoading)
                         }
                         Button("完成", action: onClose)
+                            .disabled(isExporting)
+                    }
+                }
+            }
+            .overlay {
+                if isExporting {
+                    ZStack {
+                        Color.black.opacity(0.35).ignoresSafeArea()
+                        VStack(spacing: 12) {
+                            ProgressView(value: exportProgress)
+                                .progressViewStyle(.linear)
+                            Text(exportStatus.isEmpty ? "背景匯出中…" : exportStatus)
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(.white)
+                            Text("請勿關閉 App；大資料可能需要一兩分鐘。")
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.8))
+                        }
+                        .padding(20)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                        .padding(32)
                     }
                 }
             }
@@ -2374,7 +2404,9 @@ private struct PoseDatabaseSheet: View {
 
     private var cloudTrainHelpCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("已上傳雲端的標註，可直接在 Mac 拉資料：")
+            Text(uploadedCount > 0
+                 ? "已有 \(uploadedCount) 筆上傳雲端：刪 App 也不會丟這批。Mac 用下方指令即可，不必匯出 JSON。"
+                 : "若標記時有出現「上傳成功」，雲端就有資料；Mac 用下方指令即可。本機沒標註／診斷顯示空，不代表雲端一定是空的。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             Text(cloudDiagnoseCommand)
@@ -2395,8 +2427,44 @@ private struct PoseDatabaseSheet: View {
     }
 
     private func reload() {
-        records = database.sessions()
-        totalNodes = database.totalNodeCount()
+        isLoading = true
+        Task {
+            let summary = await database.loadSessionsSummary()
+            await MainActor.run {
+                records = summary.records
+                totalNodes = summary.approxNodeCount
+                labeledCount = summary.labeledCount
+                uploadedCount = summary.uploadedCount
+                isLoading = false
+            }
+        }
+    }
+
+    private func startExport() {
+        guard !isExporting else { return }
+        exportError = nil
+        isExporting = true
+        exportProgress = 0
+        exportStatus = "開始匯出…"
+        Task {
+            do {
+                let url = try await database.exportLabeledTrainingJSON { fraction, status in
+                    Task { @MainActor in
+                        exportProgress = fraction
+                        exportStatus = status
+                    }
+                }
+                await MainActor.run {
+                    isExporting = false
+                    exportURL = url
+                }
+            } catch {
+                await MainActor.run {
+                    isExporting = false
+                    exportError = error.localizedDescription
+                }
+            }
+        }
     }
 }
 

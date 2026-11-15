@@ -251,37 +251,54 @@ final class PoseDatabase {
 
     // MARK: 查詢
 
+    /// 清單用：只讀 `frames.count`（O(1)），不掃每個節點，避免大庫卡死 UI。
     func sessions() -> [PoseSessionRecord] {
-        queue.sync {
-            guard let realm = try? openRealm() else { return [] }
-            return realm.objects(RLMPoseSession.self)
-                .sorted(byKeyPath: "startedAt", ascending: false)
-                .map { session in
-                    let nodeCount = session.frames.reduce(0) { $0 + $1.nodes.count }
-                    return PoseSessionRecord(
-                        id: session.id,
-                        startedAt: session.startedAt,
-                        endedAt: session.endedAt,
-                        sourceLabel: session.sourceLabel,
-                        frameCount: session.frames.count,
-                        nodeCount: nodeCount,
-                        totalSteps: session.totalSteps,
-                        leftSteps: session.leftSteps,
-                        rightSteps: session.rightSteps,
-                        avgCadenceBPM: session.avgCadenceBPM,
-                        trainingLabel: session.trainingLabel,
-                        cloudUploadedAt: session.cloudUploadedAt
-                    )
-                }
+        queue.sync { sessionsOnQueue() }
+    }
+
+    /// 背景載入清單，避免主執行緒 `queue.sync` 卡住。
+    func loadSessionsSummary() async -> (records: [PoseSessionRecord], approxNodeCount: Int, labeledCount: Int, uploadedCount: Int) {
+        await withCheckedContinuation { cont in
+            queue.async {
+                let records = self.sessionsOnQueue()
+                let approx = records.reduce(0) { $0 + $1.nodeCount }
+                let labeled = records.filter { $0.trainingLabel == "good" || $0.trainingLabel == "bad" }.count
+                let uploaded = records.filter { $0.cloudUploadedAt != nil }.count
+                cont.resume(returning: (records, approx, labeled, uploaded))
+            }
         }
+    }
+
+    private func sessionsOnQueue() -> [PoseSessionRecord] {
+        guard let realm = try? openRealm() else { return [] }
+        return realm.objects(RLMPoseSession.self)
+            .sorted(byKeyPath: "startedAt", ascending: false)
+            .map { session in
+                let frameCount = session.frames.count
+                // 約略節點數：不遍歷每幀 nodes，避免開啟資料庫就 OOM／卡死。
+                let nodeCount = frameCount * 35
+                return PoseSessionRecord(
+                    id: session.id,
+                    startedAt: session.startedAt,
+                    endedAt: session.endedAt,
+                    sourceLabel: session.sourceLabel,
+                    frameCount: frameCount,
+                    nodeCount: nodeCount,
+                    totalSteps: session.totalSteps,
+                    leftSteps: session.leftSteps,
+                    rightSteps: session.rightSteps,
+                    avgCadenceBPM: session.avgCadenceBPM,
+                    trainingLabel: session.trainingLabel,
+                    cloudUploadedAt: session.cloudUploadedAt
+                )
+            }
     }
 
     func totalNodeCount() -> Int {
         queue.sync {
             guard let realm = try? openRealm() else { return 0 }
-            return realm.objects(RLMPoseSession.self).reduce(0) { total, session in
-                total + session.frames.reduce(0) { $0 + $1.nodes.count }
-            }
+            // 約略值：frames.count * 35，避免全表掃節點。
+            return realm.objects(RLMPoseSession.self).reduce(0) { $0 + $1.frames.count * 35 }
         }
     }
 
@@ -329,76 +346,140 @@ final class PoseDatabase {
         }
     }
 
-    /// 匯出已標 good/bad 的 session（含節點），給 Mac `train.py --from-json` 使用。
-    func exportLabeledTrainingJSON() throws -> URL {
-        let engine = kind == .mediaPipe ? "mediapipe" : "pose"
-        let built: (payload: [String: Any]?, error: String?) = queue.sync {
-            guard let realm = try? openRealm() else {
-                return (nil, "無法開啟本機資料庫")
-            }
-            let labeled = realm.objects(RLMPoseSession.self).filter { session in
-                session.trainingLabel == "good" || session.trainingLabel == "bad"
-            }
-            guard !labeled.isEmpty else {
-                return (nil, "還沒有本機標好／壞的資料。請先在詳情頁標記。")
-            }
-            let sessionsPayload: [[String: Any]] = labeled.map { session in
-                let frames: [[String: Any]] = session.frames
-                    .sorted(by: { $0.frameIndex < $1.frameIndex })
-                    .map { frame in
-                        [
-                            "frame_index": frame.frameIndex,
-                            "timestamp": frame.timestamp,
-                            "nodes": frame.nodes.map { node in
-                                [
-                                    "joint": node.joint,
-                                    "x": node.x,
-                                    "y": node.y,
-                                    "z": node.z,
-                                    "visibility": node.visibility,
-                                    "presence": node.presence,
-                                ]
-                            },
-                        ]
-                    }
-                let source = session.sourceLabel
-                var doc: [String: Any] = [
-                    "_id": session.id,
-                    "label": session.trainingLabel ?? "",
-                    "source_label": kind == .mediaPipe && !source.hasPrefix("mediapipe")
-                        ? "mediapipe｜\(source)"
-                        : source,
-                    "engine": engine,
-                    "total_steps": session.totalSteps,
-                    "left_steps": session.leftSteps,
-                    "right_steps": session.rightSteps,
-                    "frames": frames,
-                ]
-                if let bpm = session.avgCadenceBPM {
-                    doc["avg_cadence_bpm"] = bpm
+    /// 背景匯出已標 good/bad 的 session（串流寫檔、每段最多抽樣 `maxFramesPerSession` 幀）。
+    /// 勿在主執行緒呼叫舊的同步大 JSON 組裝，否則大庫會卡死／被系統殺掉。
+    func exportLabeledTrainingJSON(
+        maxFramesPerSession: Int = 240,
+        progress: (@Sendable (Double, String) -> Void)? = nil
+    ) async throws -> URL {
+        try await withCheckedThrowingContinuation { cont in
+            queue.async {
+                do {
+                    let url = try self.exportLabeledTrainingJSONOnQueue(
+                        maxFramesPerSession: max(1, maxFramesPerSession),
+                        progress: progress
+                    )
+                    cont.resume(returning: url)
+                } catch {
+                    cont.resume(throwing: error)
                 }
-                return doc
             }
-            return (
-                [
-                    "engine": engine,
-                    "count": sessionsPayload.count,
-                    "sessions": sessionsPayload,
-                ],
-                nil
+        }
+    }
+
+    private func exportLabeledTrainingJSONOnQueue(
+        maxFramesPerSession: Int,
+        progress: (@Sendable (Double, String) -> Void)?
+    ) throws -> URL {
+        let engine = kind == .mediaPipe ? "mediapipe" : "pose"
+        guard let realm = try? openRealm() else {
+            throw NSError(domain: "PoseDatabase", code: 1, userInfo: [NSLocalizedDescriptionKey: "無法開啟本機資料庫"])
+        }
+        let labeled = realm.objects(RLMPoseSession.self).filter { session in
+            session.trainingLabel == "good" || session.trainingLabel == "bad"
+        }
+        let sessions = Array(labeled)
+        guard !sessions.isEmpty else {
+            throw NSError(
+                domain: "PoseDatabase",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "還沒有本機標好／壞的資料。請先在詳情頁標記；若已上傳雲端，請改用 Mac 的 --from-api，不要刪 App。"]
             )
         }
-        if let error = built.error {
-            throw NSError(domain: "PoseDatabase", code: 1, userInfo: [NSLocalizedDescriptionKey: error])
-        }
-        guard let payload = built.payload else {
-            throw NSError(domain: "PoseDatabase", code: 1, userInfo: [NSLocalizedDescriptionKey: "匯出失敗"])
-        }
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted])
+
         let name = kind == .mediaPipe ? "mediapipe_training_export.json" : "pose_training_export.json"
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
-        try data.write(to: url, options: .atomic)
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+
+        func write(_ string: String) throws {
+            if let data = string.data(using: .utf8) {
+                try handle.write(contentsOf: data)
+            }
+        }
+
+        progress?(0, "準備匯出 \(sessions.count) 筆…")
+        try write("{\"engine\":\(Self.jsonString(engine)),\"count\":\(sessions.count),\"sessions\":[")
+
+        for (index, session) in sessions.enumerated() {
+            if index > 0 { try write(",") }
+            try write(Self.encodeSessionJSON(session, engine: engine, maxFrames: maxFramesPerSession))
+            let fraction = Double(index + 1) / Double(sessions.count)
+            progress?(fraction, "已寫入 \(index + 1)/\(sessions.count)")
+            // 讓出一點 CPU，降低被 watchdog 殺掉的機率。
+            if index % 2 == 1 {
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+        }
+        try write("]}")
+        progress?(1, "匯出完成")
         return url
+    }
+
+    private static func jsonString(_ value: String) -> String {
+        let data = try? JSONSerialization.data(withJSONObject: value, options: [])
+        return data.flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
+    }
+
+    private static func encodeSessionJSON(_ session: RLMPoseSession, engine: String, maxFrames: Int) throws -> String {
+        let source = session.sourceLabel
+        let sourceLabel = engine == "mediapipe" && !source.hasPrefix("mediapipe")
+            ? "mediapipe｜\(source)"
+            : source
+        let sorted = session.frames.sorted(by: { $0.frameIndex < $1.frameIndex })
+        let picked: [RLMPoseFrame]
+        if sorted.count <= maxFrames {
+            picked = sorted
+        } else {
+            // 均勻抽樣，避免一次把超長影片全部塞進 JSON。
+            picked = (0..<maxFrames).map { i in
+                let idx = i * (sorted.count - 1) / max(maxFrames - 1, 1)
+                return sorted[idx]
+            }
+        }
+
+        var framesJSON: [[String: Any]] = []
+        framesJSON.reserveCapacity(picked.count)
+        for frame in picked {
+            let nodes: [[String: Any]] = frame.nodes.map { node in
+                [
+                    "joint": node.joint,
+                    "x": node.x,
+                    "y": node.y,
+                    "z": node.z,
+                    "visibility": node.visibility,
+                    "presence": node.presence,
+                ]
+            }
+            framesJSON.append([
+                "frame_index": frame.frameIndex,
+                "timestamp": frame.timestamp,
+                "nodes": nodes,
+            ])
+        }
+
+        var doc: [String: Any] = [
+            "_id": session.id,
+            "label": session.trainingLabel ?? "",
+            "source_label": sourceLabel,
+            "engine": engine,
+            "total_steps": session.totalSteps,
+            "left_steps": session.leftSteps,
+            "right_steps": session.rightSteps,
+            "frames": framesJSON,
+        ]
+        if let bpm = session.avgCadenceBPM {
+            doc["avg_cadence_bpm"] = bpm
+        }
+        let data = try JSONSerialization.data(withJSONObject: doc, options: [])
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw NSError(domain: "PoseDatabase", code: 3, userInfo: [NSLocalizedDescriptionKey: "JSON 編碼失敗"])
+        }
+        return text
     }
 
     func clearAll() {
