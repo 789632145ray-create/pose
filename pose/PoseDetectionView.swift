@@ -36,6 +36,8 @@ final class QuickPoseEngine: ObservableObject {
     var assessmentEngine: PoseAssessmentEngine = .trainedModel
     /// 自訓＋MediaPipe 模型或 MediaPipe 引擎時寫入 mediapipe.realm。
     var prefersMediaPipeStore = false
+    /// 僅「拍攝視角＝背面」時啟用背面特徵與分級信心門檻。
+    var usesBackViewPipeline = false
     var activityMode: GaitActivityMode = .walking
     private var restartTask: Task<Void, Never>?
 
@@ -43,10 +45,22 @@ final class QuickPoseEngine: ObservableObject {
     var bodyGaitProfile: BodyGaitProfile?
     var onStreamEnqueue: (([PoseNode], TimeInterval) -> Void)?
     var onStepEvents: (([StepEvent]) -> Void)?
-    /// 遮擋關節：手臂 < 0.25、核心 < 0.7 不直接採計，延遲一幀以前後可信點插值補齊。
-    private let jointConfidenceFilter = JointConfidenceFilter(threshold: 0.25, coreThreshold: 0.7)
+    /// 遮擋關節過濾；背面模式用手臂 0.25／核心 0.7，其餘視角用一般 0.5。
+    private let jointConfidenceFilter = JointConfidenceFilter(threshold: 0.5, coreThreshold: 0.5)
     /// 背面視角特徵管線（正規化、生物力學指標、防抖提醒）。
     let backViewPipeline = BackViewPosePipeline()
+
+    func syncConfidenceFilterForCaptureView(isBackView: Bool) {
+        usesBackViewPipeline = isBackView
+        if isBackView {
+            jointConfidenceFilter.threshold = 0.25
+            jointConfidenceFilter.coreThreshold = 0.7
+        } else {
+            jointConfidenceFilter.threshold = 0.5
+            jointConfidenceFilter.coreThreshold = 0.5
+            backViewPipeline.reset()
+        }
+    }
 
     @Published var fpsText = "FPS: —"
     @Published var adviceLines: [String] = ["正在檢查相機權限…"]
@@ -174,14 +188,18 @@ final class QuickPoseEngine: ObservableObject {
                     mergedLines.append(contentsOf: gait.lines)
                 }
                 // 寫入／串流使用定稿幀（手臂等低信心關節已插值或丟棄）。
-                let nodes = stabilized ?? (rawNodes ?? []).filter { $0.confidenceScore >= 0.25 }
-                let backFeatures = backViewPipeline.process(nodes: nodes)
+                let minKeep = usesBackViewPipeline ? 0.25 : 0.5
+                let nodes = stabilized ?? (rawNodes ?? []).filter { $0.confidenceScore >= minKeep }
                 var finalLines = mergedLines
-                if backFeatures.coreReliable || !backFeatures.adviceLines.isEmpty {
-                    finalLines.append(contentsOf: backFeatures.adviceLines)
-                }
                 var finalIssues = mergedIssues
-                finalIssues.formUnion(backFeatures.debouncedIssues)
+                // 背面特徵／分級門檻只在「拍攝視角＝背面」啟用。
+                if usesBackViewPipeline {
+                    let backFeatures = backViewPipeline.process(nodes: nodes)
+                    if backFeatures.coreReliable || !backFeatures.adviceLines.isEmpty {
+                        finalLines.append(contentsOf: backFeatures.adviceLines)
+                    }
+                    finalIssues.formUnion(backFeatures.debouncedIssues)
+                }
                 let advice = PoseFrameAdvice(lines: finalLines, issues: finalIssues)
                 let store: PoseDatabase = prefersMediaPipeStore ? .mediaPipe : .shared
                 store.recordFrame(nodes: nodes)
@@ -556,6 +574,7 @@ struct PoseDetectionView: View {
                 refreshCameraGate()
                 syncAssessmentEngine()
                 syncActivityMode()
+                syncCaptureViewMode()
                 wireQuickPoseEngineCallbacks()
                 syncBodyGaitProfile()
             }
@@ -568,6 +587,9 @@ struct PoseDetectionView: View {
             .onChange(of: modeStore.activity) { _, _ in
                 syncActivityMode()
                 if isPaused { applyPausedIdleState() }
+            }
+            .onChange(of: modeStore.captureView) { _, _ in
+                syncCaptureViewMode()
             }
             .onChange(of: auth.userProfile) { _, _ in
                 syncBodyGaitProfile()
@@ -727,6 +749,7 @@ struct PoseDetectionView: View {
                 SkeletonModelPickerRow()
             }
             GaitActivityPickerRow()
+            CaptureViewPickerRow()
             bottomControls
 
             Button {
@@ -970,6 +993,7 @@ struct PoseDetectionView: View {
     private func wireQuickPoseEngineCallbacks() {
         syncAssessmentEngine()
         syncActivityMode()
+        syncCaptureViewMode()
         quickPoseEngine.analysisPipeline = analysisPipeline
         syncBodyGaitProfile()
         quickPoseEngine.onStreamEnqueue = { [stream] nodes, ts in
@@ -991,6 +1015,11 @@ struct PoseDetectionView: View {
         let activity = modeStore.activity
         quickPoseEngine.activityMode = activity
         analysisPipeline.activityMode = activity
+    }
+
+    @MainActor
+    private func syncCaptureViewMode() {
+        quickPoseEngine.syncConfidenceFilterForCaptureView(isBackView: modeStore.isBackView)
     }
 
     @MainActor
@@ -1177,7 +1206,9 @@ struct PoseDetectionView: View {
     @MainActor
     private func buildSummaryLinesForHistory(includeQuality: Bool = true) -> [String] {
         var lines = analysisPipeline.videoSummary()
-        lines.append(contentsOf: quickPoseEngine.backViewPipeline.sessionSummaryLines())
+        if modeStore.isBackView {
+            lines.append(contentsOf: quickPoseEngine.backViewPipeline.sessionSummaryLines())
+        }
         guard includeQuality, assessmentEngine.usesQualityPredict else { return lines }
         if let pred = videoQualityResult ?? livePrediction,
            pred.note == nil,
@@ -1716,6 +1747,11 @@ struct PoseDetectionView: View {
                 Text(modeStore.activity.coreTitle)
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(modeStore.activity == .running ? .orange : .cyan)
+                if modeStore.isBackView {
+                    Text("拍攝視角 · 背面")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.mint)
+                }
             }
             Text(quickPoseEngine.fpsText)
                 .font(.system(size: 16, weight: .semibold, design: .rounded))
