@@ -9,7 +9,8 @@
 import SwiftUI
 
 enum MediaPipeSkeletonGraph {
-    static let minVisibility = 0.35
+    /// 與 JointConfidenceFilter 對齊：低信心（遮擋）關節不畫，避免背後擺臂抖點。
+    static let minVisibility = 0.5
 
     static let connections: [(String, String)] = [
         ("nose", "left_eye_inner"),

@@ -43,6 +43,8 @@ final class QuickPoseEngine: ObservableObject {
     var bodyGaitProfile: BodyGaitProfile?
     var onStreamEnqueue: (([PoseNode], TimeInterval) -> Void)?
     var onStepEvents: (([StepEvent]) -> Void)?
+    /// 遮擋關節：信心 < 0.5 不直接採計，延遲一幀以前後可信點插值補齊。
+    private let jointConfidenceFilter = JointConfidenceFilter(threshold: 0.5)
 
     @Published var fpsText = "FPS: —"
     @Published var adviceLines: [String] = ["正在檢查相機權限…"]
@@ -138,11 +140,13 @@ final class QuickPoseEngine: ObservableObject {
         if let image {
             overlayImage = image
         }
-        if let landmarks {
-            let nodes = PoseNodeExtractor.extractAll(from: landmarks)
-            if nodes.contains(where: MediaPipeSkeletonGraph.isVisible) {
-                previewNodes = nodes
-            }
+
+        let rawNodes = landmarks.map { PoseNodeExtractor.extractAll(from: $0) }
+        // 每幀只 push 一次：低信心關節延遲一幀插值；首幀尚無定稿時先用原始點預覽。
+        let stabilized = rawNodes.flatMap { jointConfidenceFilter.push($0) }
+        let preview = stabilized ?? rawNodes
+        if let preview, preview.contains(where: MediaPipeSkeletonGraph.isVisible) {
+            previewNodes = preview
         }
 
         switch status {
@@ -168,7 +172,8 @@ final class QuickPoseEngine: ObservableObject {
                     mergedLines.append(contentsOf: gait.lines)
                 }
                 let advice = PoseFrameAdvice(lines: mergedLines, issues: mergedIssues)
-                let nodes = PoseNodeExtractor.extractAll(from: landmarks)
+                // 寫入／串流使用定稿幀（手臂等低信心關節已插值或丟棄）。
+                let nodes = stabilized ?? (rawNodes ?? []).filter { $0.confidenceScore >= 0.5 }
                 let store: PoseDatabase = prefersMediaPipeStore ? .mediaPipe : .shared
                 store.recordFrame(nodes: nodes)
                 let ts = Date().timeIntervalSince1970
@@ -197,6 +202,7 @@ final class QuickPoseEngine: ObservableObject {
             if detectionActive {
                 adviceLines = ["畫面中尚未偵測到人物，請站到鏡頭前。"]
                 analysisPipeline?.reset()
+                jointConfidenceFilter.reset()
             }
 
         case .sdkValidationError:
@@ -217,6 +223,12 @@ final class QuickPoseEngine: ObservableObject {
         dbNodeCount = 0
         recentSteps = []
         stepHUD = "步數 L:0 R:0 總:0"
+        jointConfidenceFilter.reset()
+    }
+
+    /// 暫停前吐出緩衝中最後一幀（已做信心插值）。
+    func flushStabilizedNodes() -> [PoseNode]? {
+        jointConfidenceFilter.flush()
     }
 }
 
@@ -1102,6 +1114,14 @@ struct PoseDetectionView: View {
     private func pauseDetectionProcessing(fullReset: Bool, preserveAnalysis: Bool = false) {
         cancelCountdown()
         quickPoseEngine.detectionActive = false
+        // 吐出信心過濾緩衝的最後一幀再截串流影格。
+        if let flushed = quickPoseEngine.flushStabilizedNodes(), !flushed.isEmpty {
+            let ts = Date().timeIntervalSince1970
+            sessionDatabase.recordFrame(nodes: flushed)
+            if assessmentEngine.usesQualityPredict {
+                stream.enqueue(nodes: flushed, timestamp: ts)
+            }
+        }
         // 必須在 stopStreaming／reset 前截下影格，否則品質辨識會變成「尚無節點資料」。
         let snap = stream.snapshotSessionFrames()
         if !snap.isEmpty {
@@ -1380,7 +1400,9 @@ struct PoseDetectionView: View {
         Task {
             if wireFrames.isEmpty, let sessionID {
                 try? await Task.sleep(nanoseconds: 150_000_000)
-                let records = database.allFrames(sessionID: sessionID)
+                let records = JointConfidenceFilter.interpolateSession(
+                    database.allFrames(sessionID: sessionID)
+                )
                 let result = await stream.predict(frames: records)
                 await MainActor.run {
                     applyVideoQualityResult(result, fallback: fallbackQuality)
@@ -1446,7 +1468,9 @@ struct PoseDetectionView: View {
                 result = await stream.predict(frames: wireFrames)
             } else if let sessionID {
                 try? await Task.sleep(nanoseconds: 150_000_000)
-                let records = database.allFrames(sessionID: sessionID)
+                let records = JointConfidenceFilter.interpolateSession(
+                    database.allFrames(sessionID: sessionID)
+                )
                 result = await stream.predict(frames: records)
             } else {
                 result = fallback
@@ -2410,7 +2434,9 @@ private struct PoseSessionDetailView: View {
 
     private func uploadLabel(_ label: String) {
         statusMessage = nil
-        let frames = database.allFrames(sessionID: record.id)
+        let frames = JointConfidenceFilter.interpolateSession(
+            database.allFrames(sessionID: record.id)
+        )
         guard !frames.isEmpty else {
             isUploadError = true
             statusMessage = "此筆尚無節點。請回到偵測畫面按「暫停」後再上傳。"
