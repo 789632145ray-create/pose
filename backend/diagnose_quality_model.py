@@ -10,11 +10,13 @@
 注意：正式線上模型是 RandomForest（無 Epoch）。本腳本的 100 Epochs 是刻意的過擬合
 檢查；同一批 10 筆也會跑 RF 記憶測試作為對照。
 
-使用：
+使用（不必先有手機匯出的 JSON；優先 --from-api）：
   cd backend && source .venv/bin/activate
-  python diagnose_quality_model.py
+  python diagnose_quality_model.py --engine mediapipe \\
+    --from-api https://runpose-backend-production.up.railway.app \\
+    --username 你的帳號 --save-json training_from_api.json
+  # 密碼可用參數 --password，或環境變數 POSE_API_PASSWORD
   python diagnose_quality_model.py --engine mediapipe --from-json export.json
-  python diagnose_quality_model.py --engine mediapipe --from-api https://... --username 帳號
 """
 
 from __future__ import annotations
@@ -77,8 +79,28 @@ def _synthetic_docs(n: int = 10) -> list[dict]:
     return docs
 
 
+def _maybe_save_api_json(args: argparse.Namespace, sessions: list[dict]) -> None:
+    path = getattr(args, "save_json", None)
+    if not path:
+        return
+    payload = {
+        "engine": args.engine,
+        "count": len(sessions),
+        "by_label": {
+            "good": sum(1 for doc in sessions if doc.get("label") == "good"),
+            "bad": sum(1 for doc in sessions if doc.get("label") == "bad"),
+        },
+        "sessions": sessions,
+    }
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    print(f"[資料] 已把雲端匯出寫成 JSON：{path}（之後可用 --from-json 重跑）")
+
+
 def load_xy(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray, str]:
     """與 train.py 相同資料來源；若沒有標註資料則退回合成樣本。"""
+    from train import fetch_docs_from_api, rows_from_docs
+
     engine = args.engine
     if args.from_json:
         X, y = load_dataset_from_json(args.from_json, engine)
@@ -87,25 +109,34 @@ def load_xy(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray, str]:
         username = (args.username or os.environ.get("POSE_API_USERNAME") or "").strip()
         password = args.password or os.environ.get("POSE_API_PASSWORD") or ""
         if not username or not password:
-            raise RuntimeError("使用 --from-api 時請提供 --username / --password")
-        X, y = load_dataset_from_api(args.from_api, username, password, engine)
+            raise RuntimeError(
+                "使用 --from-api 時請提供 --username / --password（或 POSE_API_USERNAME、POSE_API_PASSWORD）。\n"
+                "這不需要手機匯出 JSON：登入後會打雲端 GET /dataset/export。"
+            )
+        sessions = fetch_docs_from_api(args.from_api, username, password, engine)
+        _maybe_save_api_json(args, sessions)
+        X, y = rows_from_docs(sessions)
         source = f"api:{args.from_api}"
     else:
         try:
             X, y = load_dataset(engine)
             source = f"mongo:{os.environ.get('POSE_MONGO_URL', 'mongodb://localhost:27017')}"
         except RuntimeError as exc:
-            print(f"[資料] Mongo 無法使用（{exc}），改用合成 10 筆做過擬合檢查。")
-            from train import rows_from_docs
-
+            print(f"[資料] Mongo 無法使用（{exc}）。")
+            print(
+                "若資料已上傳 Railway，請改用（不必 JSON）：\n"
+                "  python diagnose_quality_model.py --engine mediapipe \\\n"
+                "    --from-api https://runpose-backend-production.up.railway.app \\\n"
+                "    --username 你的帳號 --save-json training_from_api.json"
+            )
+            print("暫時改用合成 10 筆做過擬合檢查。")
             X, y = rows_from_docs(_synthetic_docs(OVERFIT_N))
             source = "synthetic"
             return X, y, source
 
     if len(X) == 0:
-        print("[資料] 沒有已標註樣本，改用合成 10 筆做過擬合檢查。")
-        from train import rows_from_docs
-
+        print("[資料] 沒有已標註樣本。若你只在手機標過但本機沒檔案，請改用 --from-api。")
+        print("暫時改用合成 10 筆做過擬合檢查。")
         X, y = rows_from_docs(_synthetic_docs(OVERFIT_N))
         source = "synthetic"
     return X, y, source
@@ -316,6 +347,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--username", default=None)
     parser.add_argument("--password", default=None)
     parser.add_argument("--from-json", metavar="FILE", default=None)
+    parser.add_argument(
+        "--save-json",
+        metavar="FILE",
+        default=None,
+        help="搭配 --from-api：把雲端 sessions 另存成本地 JSON（之後就不必再匯出手機檔）",
+    )
     parser.add_argument("--overfit-n", type=int, default=OVERFIT_N)
     parser.add_argument("--epochs", type=int, default=OVERFIT_EPOCHS)
     parser.add_argument("--json-out", metavar="FILE", help="把診斷結果寫成 JSON")

@@ -298,15 +298,15 @@ def empty_dataset_hint(engine: str, mongo_url: str, from_api: bool) -> str:
             "",
             "若 --from-api 仍是 0 筆：請確認 App 詳情頁有出現「上傳成功」，",
             "且登入的是同一個帳號；雲端需已部署含 /dataset/export 的後端。",
-            "也可以在 App 資料庫按「匯出訓練 JSON」，再：",
-            f"  python train.py --engine {engine} --from-json 檔案.json",
+            "不必依賴手機「匯出 JSON」。",
         ]
     elif "localhost" in mongo_url or "127.0.0.1" in mongo_url:
         lines += [
             "",
             "你現在連的是本機空庫。不要複製文件裡的 mongodb+srv://...",
-            "請到 Railway → Variables 複製完整 POSE_MONGO_URL，或從手機匯出 JSON：",
-            f"  python train.py --engine {engine} --from-json 檔案.json",
+            "優先用雲端帳號拉資料（不必手機匯出 JSON）：",
+            f"  python train.py --engine {engine} --from-api https://runpose-backend-production.up.railway.app --username 帳號",
+            "或到 Railway → Variables 複製完整 POSE_MONGO_URL。",
         ]
     else:
         lines += [

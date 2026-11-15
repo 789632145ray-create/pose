@@ -86,7 +86,7 @@ class TrainDatasetTests(unittest.TestCase):
         hint = empty_dataset_hint("mediapipe", "mongodb://localhost:27017", from_api=False)
         self.assertIn("localhost", hint)
         self.assertIn("POSE_MONGO_URL", hint)
-        self.assertIn("--from-json", hint)
+        self.assertIn("--from-api", hint)
 
     def test_placeholder_mongo_url_is_rejected(self):
         self.assertIsNotNone(describe_mongo_url_problem("mongodb+srv://..."))
