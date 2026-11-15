@@ -30,11 +30,34 @@ enum PoseSkeletonModel: String, CaseIterable, Identifiable {
     }
 }
 
+/// 拍攝視角：背面管線（信心分級、背面特徵）只在「背面」啟用。
+enum PoseCaptureViewMode: String, CaseIterable, Identifiable {
+    case front
+    case back
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .front: return "正面／側面"
+        case .back: return "背面"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .front: return "person.fill"
+        case .back: return "person.fill.turn.right"
+        }
+    }
+}
+
 @MainActor
 final class DetectionModeStore: ObservableObject {
     @AppStorage("poseDetectionEngine") private var engineRaw = PoseAssessmentEngine.trainedModel.rawValue
     @AppStorage("poseGaitActivity") private var activityRaw = GaitActivityMode.walking.rawValue
     @AppStorage("poseSkeletonModel") private var skeletonRaw = PoseSkeletonModel.mediaPipe.rawValue
+    @AppStorage("poseCaptureViewMode") private var captureViewRaw = PoseCaptureViewMode.front.rawValue
 
     var engine: PoseAssessmentEngine {
         get { PoseAssessmentEngine.resolved(fromStored: engineRaw) }
@@ -60,6 +83,16 @@ final class DetectionModeStore: ObservableObject {
             objectWillChange.send()
         }
     }
+
+    var captureView: PoseCaptureViewMode {
+        get { PoseCaptureViewMode(rawValue: captureViewRaw) ?? .front }
+        set {
+            captureViewRaw = newValue.rawValue
+            objectWillChange.send()
+        }
+    }
+
+    var isBackView: Bool { captureView == .back }
 }
 
 struct PoseDetectionShellView: View {
@@ -243,6 +276,44 @@ struct GaitActivityPickerRow: View {
                     .accessibilityLabel(mode.title)
                     .accessibilityAddTraits(selected ? .isSelected : [])
                 }
+            }
+        }
+    }
+}
+
+struct CaptureViewPickerRow: View {
+    @EnvironmentObject private var modeStore: DetectionModeStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("拍攝視角")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.75))
+            HStack(spacing: 6) {
+                ForEach(PoseCaptureViewMode.allCases) { mode in
+                    let selected = modeStore.captureView == mode
+                    Button {
+                        modeStore.captureView = mode
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: mode.systemImage)
+                                .font(.caption.weight(.semibold))
+                            Text(mode.title)
+                                .font(.caption.weight(.bold))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(selected ? (mode == .back ? .mint : .cyan) : .gray)
+                    .accessibilityLabel(mode.title)
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                }
+            }
+            if modeStore.isBackView {
+                Text("背面模式：啟用背面特徵、手臂低信心門檻與耳－肩頭部推估。")
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.65))
             }
         }
     }

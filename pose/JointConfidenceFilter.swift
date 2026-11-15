@@ -36,20 +36,29 @@ extension PoseNode {
 /// 即時關節穩定器：低信心關節延遲一幀，用前後可信座標線性插值補齊。
 @MainActor
 final class JointConfidenceFilter {
-    /// 低於此分數視為遮擋／不可信（預設 0.5）。
+    /// 手臂關節信心門檻（背面擺臂易遮擋，預設 0.25）。
     var threshold: Double
+    /// 核心穩定區（肩／髖／膝／踝）門檻（背面預設 0.7）。
+    var coreThreshold: Double
 
     /// 手臂與末端關節較容易被軀幹遮擋。
     private static let armJoints: Set<String> = [
         "left_elbow", "left_wrist", "left_pinky", "left_index", "left_thumb",
         "right_elbow", "right_wrist", "right_pinky", "right_index", "right_thumb"
     ]
+    private static let coreJoints: Set<String> = [
+        "left_shoulder", "right_shoulder",
+        "left_hip", "right_hip",
+        "left_knee", "right_knee",
+        "left_ankle", "right_ankle"
+    ]
 
     private var buffered: [PoseNode]?
     private var lastTrusted: [String: PoseNode] = [:]
 
-    init(threshold: Double = 0.5) {
+    init(threshold: Double = 0.25, coreThreshold: Double = 0.7) {
         self.threshold = threshold
+        self.coreThreshold = coreThreshold
     }
 
     func reset() {
@@ -78,11 +87,13 @@ final class JointConfidenceFilter {
 
     private func isTrusted(_ node: PoseNode) -> Bool {
         let score = node.confidenceScore
+        if Self.coreJoints.contains(node.joint) {
+            return score >= coreThreshold
+        }
         if Self.armJoints.contains(node.joint) {
             return score >= threshold
         }
-        // 軀幹／下肢略寬，避免過度補點。
-        return score >= min(threshold, 0.35)
+        return score >= 0.25
     }
 
     private func finalize(frame: [PoseNode], nextFrame: [PoseNode]) -> [PoseNode] {
