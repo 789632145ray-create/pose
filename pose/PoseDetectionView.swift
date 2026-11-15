@@ -43,8 +43,10 @@ final class QuickPoseEngine: ObservableObject {
     var bodyGaitProfile: BodyGaitProfile?
     var onStreamEnqueue: (([PoseNode], TimeInterval) -> Void)?
     var onStepEvents: (([StepEvent]) -> Void)?
-    /// 遮擋關節：信心 < 0.5 不直接採計，延遲一幀以前後可信點插值補齊。
-    private let jointConfidenceFilter = JointConfidenceFilter(threshold: 0.5)
+    /// 遮擋關節：手臂 < 0.4、核心 < 0.7 不直接採計，延遲一幀以前後可信點插值補齊。
+    private let jointConfidenceFilter = JointConfidenceFilter(threshold: 0.4, coreThreshold: 0.7)
+    /// 背面視角特徵管線（正規化、生物力學指標、防抖提醒）。
+    let backViewPipeline = BackViewPosePipeline()
 
     @Published var fpsText = "FPS: —"
     @Published var adviceLines: [String] = ["正在檢查相機權限…"]
@@ -171,9 +173,16 @@ final class QuickPoseEngine: ObservableObject {
                 if !gait.lines.isEmpty {
                     mergedLines.append(contentsOf: gait.lines)
                 }
-                let advice = PoseFrameAdvice(lines: mergedLines, issues: mergedIssues)
                 // 寫入／串流使用定稿幀（手臂等低信心關節已插值或丟棄）。
-                let nodes = stabilized ?? (rawNodes ?? []).filter { $0.confidenceScore >= 0.5 }
+                let nodes = stabilized ?? (rawNodes ?? []).filter { $0.confidenceScore >= 0.4 }
+                let backFeatures = backViewPipeline.process(nodes: nodes)
+                var finalLines = mergedLines
+                if backFeatures.coreReliable || !backFeatures.adviceLines.isEmpty {
+                    finalLines.append(contentsOf: backFeatures.adviceLines)
+                }
+                var finalIssues = mergedIssues
+                finalIssues.formUnion(backFeatures.debouncedIssues)
+                let advice = PoseFrameAdvice(lines: finalLines, issues: finalIssues)
                 let store: PoseDatabase = prefersMediaPipeStore ? .mediaPipe : .shared
                 store.recordFrame(nodes: nodes)
                 let ts = Date().timeIntervalSince1970
@@ -203,6 +212,7 @@ final class QuickPoseEngine: ObservableObject {
                 adviceLines = ["畫面中尚未偵測到人物，請站到鏡頭前。"]
                 analysisPipeline?.reset()
                 jointConfidenceFilter.reset()
+                backViewPipeline.reset()
             }
 
         case .sdkValidationError:
@@ -224,6 +234,7 @@ final class QuickPoseEngine: ObservableObject {
         recentSteps = []
         stepHUD = "步數 L:0 R:0 總:0"
         jointConfidenceFilter.reset()
+        backViewPipeline.reset()
     }
 
     /// 暫停前吐出緩衝中最後一幀（已做信心插值）。
@@ -1166,6 +1177,7 @@ struct PoseDetectionView: View {
     @MainActor
     private func buildSummaryLinesForHistory(includeQuality: Bool = true) -> [String] {
         var lines = analysisPipeline.videoSummary()
+        lines.append(contentsOf: quickPoseEngine.backViewPipeline.sessionSummaryLines())
         guard includeQuality, assessmentEngine.usesQualityPredict else { return lines }
         if let pred = videoQualityResult ?? livePrediction,
            pred.note == nil,
@@ -1367,10 +1379,8 @@ struct PoseDetectionView: View {
     @MainActor
     private func analyzeVideoQualityAndShowSummary() {
         // 僅在仍有評估幀時覆寫摘要；暫停後 pipeline 已 reset，不可用「尚未取得…」蓋掉既有摘要。
-        if analysisPipeline.hasEvaluatedFrames {
-            summaryLines = analysisPipeline.videoSummary()
-        } else if summaryLines.isEmpty {
-            summaryLines = analysisPipeline.videoSummary()
+        if analysisPipeline.hasEvaluatedFrames || summaryLines.isEmpty {
+            summaryLines = buildSummaryLinesForHistory(includeQuality: false)
         }
 
         guard assessmentEngine.usesQualityPredict else {
