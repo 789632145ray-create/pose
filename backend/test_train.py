@@ -6,8 +6,10 @@ import tempfile
 
 from mongo_util import describe_mongo_url_problem
 from train import (
+    FEATURE_COLUMNS,
     empty_dataset_hint,
     is_mediapipe_training_doc,
+    label_class_ratios,
     labeled_feature_row,
     load_dataset_from_json,
     parse_args,
@@ -37,6 +39,35 @@ class TrainDatasetTests(unittest.TestCase):
         feats = session_features(doc)
         self.assertIsNotNone(feats)
         self.assertEqual(len(feats), 210)
+        self.assertEqual(len(feats), len(FEATURE_COLUMNS))
+
+    def test_session_features_order_matches_feature_columns(self):
+        """向量順序必須是 mean_x,std_x,mean_y,std_y,mean_z,std_z（與 FEATURE_COLUMNS 一致）。"""
+        doc = {
+            "frames": [
+                {"nodes": [{"joint": "nose", "x": 0.5, "y": 0.2, "z": -0.1}]},
+                {"nodes": [{"joint": "nose", "x": 0.7, "y": 0.4, "z": 0.1}]},
+            ]
+        }
+        feats = session_features(doc)
+        self.assertIsNotNone(feats)
+        self.assertEqual(FEATURE_COLUMNS[:6], [
+            "nose_mean_x", "nose_std_x", "nose_mean_y", "nose_std_y", "nose_mean_z", "nose_std_z",
+        ])
+        self.assertAlmostEqual(feats[0], 0.6)   # mean_x
+        self.assertAlmostEqual(feats[1], 0.1)   # std_x
+        self.assertAlmostEqual(feats[2], 0.3)   # mean_y
+        self.assertAlmostEqual(feats[3], 0.1)   # std_y
+        self.assertAlmostEqual(feats[4], 0.0)   # mean_z
+        self.assertAlmostEqual(feats[5], 0.1)   # std_z
+
+    def test_label_class_ratios(self):
+        import numpy as np
+
+        stats = label_class_ratios(np.array([1, 1, 0, 1], dtype=int))
+        self.assertEqual(stats["good"]["count"], 3)
+        self.assertEqual(stats["bad"]["count"], 1)
+        self.assertAlmostEqual(stats["good"]["ratio"], 0.75)
 
     def test_rows_skip_unlabeled_and_keep_good_bad(self):
         docs = [
@@ -55,7 +86,7 @@ class TrainDatasetTests(unittest.TestCase):
         hint = empty_dataset_hint("mediapipe", "mongodb://localhost:27017", from_api=False)
         self.assertIn("localhost", hint)
         self.assertIn("POSE_MONGO_URL", hint)
-        self.assertIn("--from-json", hint)
+        self.assertIn("--from-api", hint)
 
     def test_placeholder_mongo_url_is_rejected(self):
         self.assertIsNotNone(describe_mongo_url_problem("mongodb+srv://..."))

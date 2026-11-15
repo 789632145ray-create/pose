@@ -488,6 +488,7 @@ struct PoseDetectionView: View {
                 PoseDatabaseSheet(database: nodeDatabase, stream: stream) {
                     showDatabase = false
                 }
+                .environmentObject(auth)
             }
             .sheet(isPresented: $showMemberProfile) {
                 MemberProfileSheet(auth: auth) {
@@ -2189,10 +2190,28 @@ private struct PoseDatabaseSheet: View {
     let stream: PoseStreamClient
     let onClose: () -> Void
 
+    @EnvironmentObject private var auth: AuthManager
     @State private var records: [PoseSessionRecord] = []
     @State private var totalNodes: Int = 0
+    @State private var labeledCount: Int = 0
+    @State private var uploadedCount: Int = 0
+    @State private var isLoading = false
+    @State private var isExporting = false
+    @State private var exportProgress: Double = 0
+    @State private var exportStatus: String = ""
     @State private var exportURL: URL?
     @State private var exportError: String?
+    @State private var didCopyCloudCommand = false
+
+    private var cloudDiagnoseCommand: String {
+        // 一律 all：節點資料庫上傳在 /poses，MediaPipe 在 mediapipe_sessions；只查一邊容易變成 0 筆。
+        let user = auth.username ?? "<你的帳號>"
+        let base = ServerConfig.baseURL
+        return """
+        cd backend && source .venv/bin/activate
+        python diagnose_quality_model.py --engine all --from-api \(base) --username \(user) --save-json training_from_api.json
+        """
+    }
 
     private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -2221,16 +2240,35 @@ private struct PoseDatabaseSheet: View {
                         Text(database.fileURL.lastPathComponent)
                             .font(.caption2.monospaced())
                             .foregroundStyle(.tertiary)
+                        cloudTrainHelpCard
+                            .padding(.horizontal, 24)
+                            .padding(.top, 8)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     List {
                         Section {
+                            if isLoading {
+                                ProgressView("載入本機清單…")
+                            }
                             LabeledContent("偵測次數", value: "\(records.count)")
-                            LabeledContent("節點總筆數", value: "\(totalNodes)")
+                            LabeledContent("節點約略筆數", value: "\(totalNodes)")
+                            LabeledContent("本機已標註", value: "\(labeledCount) 筆")
+                            LabeledContent("已上傳雲端", value: "\(uploadedCount) 筆")
                             LabeledContent("本機檔案", value: database.fileURL.lastPathComponent)
                         } header: {
                             Text("總覽")
+                        } footer: {
+                            Text("已上傳雲端的標註刪 App 也不會丟；沒上傳成功的只在本機。匯出請等進度跑完，不要強制關閉。")
+                                .font(.caption2)
+                        }
+
+                        Section {
+                            cloudTrainHelpCard
+                                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                                .listRowBackground(Color.clear)
+                        } header: {
+                            Text("不必匯出 JSON 也能訓練／診斷")
                         }
 
                         Section("各次偵測") {
@@ -2288,17 +2326,36 @@ private struct PoseDatabaseSheet: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     HStack(spacing: 12) {
-                        if records.contains(where: { $0.trainingLabel == "good" || $0.trainingLabel == "bad" }) {
+                        if isExporting {
+                            ProgressView()
+                        } else {
                             Button("匯出 JSON") {
-                                do {
-                                    exportError = nil
-                                    exportURL = try database.exportLabeledTrainingJSON()
-                                } catch {
-                                    exportError = error.localizedDescription
-                                }
+                                startExport()
                             }
+                            .disabled(isLoading)
                         }
                         Button("完成", action: onClose)
+                            .disabled(isExporting)
+                    }
+                }
+            }
+            .overlay {
+                if isExporting {
+                    ZStack {
+                        Color.black.opacity(0.35).ignoresSafeArea()
+                        VStack(spacing: 12) {
+                            ProgressView(value: exportProgress)
+                                .progressViewStyle(.linear)
+                            Text(exportStatus.isEmpty ? "背景匯出中…" : exportStatus)
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(.white)
+                            Text("請勿關閉 App；大資料可能需要一兩分鐘。")
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.8))
+                        }
+                        .padding(20)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                        .padding(32)
                     }
                 }
             }
@@ -2308,9 +2365,13 @@ private struct PoseDatabaseSheet: View {
             )) {
                 if let exportURL {
                     NavigationStack {
-                        ShareLink(item: exportURL, preview: SharePreview(exportURL.lastPathComponent)) {
-                            Label("分享到 Mac / 檔案", systemImage: "square.and.arrow.up")
-                                .frame(maxWidth: .infinity)
+                        VStack(alignment: .leading, spacing: 16) {
+                            Text("用系統分享把 \(exportURL.lastPathComponent) 存到「檔案」或傳到 Mac。若分享不便，改用下方雲端指令，不必匯出 JSON。")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            PoseFileShareButton(fileURL: exportURL)
+                            cloudTrainHelpCard
+                            Spacer()
                         }
                         .padding()
                         .navigationTitle("匯出訓練 JSON")
@@ -2321,24 +2382,112 @@ private struct PoseDatabaseSheet: View {
                             }
                         }
                     }
-                    .presentationDetents([.medium])
+                    .presentationDetents([.medium, .large])
                 }
             }
             .alert("匯出失敗", isPresented: Binding(
                 get: { exportError != nil },
                 set: { if !$0 { exportError = nil } }
             )) {
+                Button("複製雲端指令") {
+                    UIPasteboard.general.string = cloudDiagnoseCommand
+                    didCopyCloudCommand = true
+                    exportError = nil
+                }
                 Button("好", role: .cancel) {}
             } message: {
-                Text(exportError ?? "")
+                Text((exportError ?? "") + "\n\n若本機沒有標註、或無法分享檔案：資料已上傳雲端時，可在 Mac 用 --from-api，不必匯出 JSON。")
             }
             .onAppear { reload() }
         }
     }
 
+    private var cloudTrainHelpCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(uploadedCount > 0
+                 ? "已有 \(uploadedCount) 筆上傳雲端：刪 App 也不會丟這批。Mac 用下方指令即可，不必匯出 JSON。"
+                 : "若標記時有出現「上傳成功」，雲端就有資料；Mac 用下方指令即可。本機沒標註／診斷顯示空，不代表雲端一定是空的。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Text(cloudDiagnoseCommand)
+                .font(.caption2.monospaced())
+                .textSelection(.enabled)
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
+            Button {
+                UIPasteboard.general.string = cloudDiagnoseCommand
+                didCopyCloudCommand = true
+            } label: {
+                Label(didCopyCloudCommand ? "已複製指令" : "複製雲端診斷指令", systemImage: didCopyCloudCommand ? "checkmark.circle.fill" : "doc.on.doc")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+
     private func reload() {
-        records = database.sessions()
-        totalNodes = database.totalNodeCount()
+        isLoading = true
+        Task {
+            let summary = await database.loadSessionsSummary()
+            await MainActor.run {
+                records = summary.records
+                totalNodes = summary.approxNodeCount
+                labeledCount = summary.labeledCount
+                uploadedCount = summary.uploadedCount
+                isLoading = false
+            }
+        }
+    }
+
+    private func startExport() {
+        guard !isExporting else { return }
+        exportError = nil
+        isExporting = true
+        exportProgress = 0
+        exportStatus = "開始匯出…"
+        Task {
+            do {
+                let url = try await database.exportLabeledTrainingJSON { fraction, status in
+                    Task { @MainActor in
+                        exportProgress = fraction
+                        exportStatus = status
+                    }
+                }
+                await MainActor.run {
+                    isExporting = false
+                    exportURL = url
+                }
+            } catch {
+                await MainActor.run {
+                    isExporting = false
+                    exportError = error.localizedDescription
+                }
+            }
+        }
+    }
+}
+
+/// 用系統分享面板傳出檔案（比 ShareLink 更穩，避免只分享路徑字串）。
+private struct PoseFileShareButton: View {
+    let fileURL: URL
+
+    var body: some View {
+        Button {
+            let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene
+            let root = scene?.windows.first(where: \.isKeyWindow)?.rootViewController
+            let picker = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
+            if let pop = picker.popoverPresentationController {
+                pop.sourceView = root?.view
+                pop.sourceRect = CGRect(x: UIScreen.main.bounds.midX, y: UIScreen.main.bounds.midY, width: 1, height: 1)
+                pop.permittedArrowDirections = []
+            }
+            root?.present(picker, animated: true)
+        } label: {
+            Label("分享 \(fileURL.lastPathComponent)", systemImage: "square.and.arrow.up")
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
     }
 }
 
@@ -2375,8 +2524,8 @@ private struct PoseSessionDetailView: View {
                 Text("此次偵測")
             } footer: {
                 Text(database.kind == .mediaPipe
-                     ? "MediaPipe 節點存在本機 mediapipe.realm。標好／壞後可上傳雲端，或在資料庫按「匯出 JSON」，到 Mac 跑 python train.py --engine mediapipe --from-json 檔案.json。"
-                     : "在此標記好 / 壞並上傳至雲端，或匯出 JSON 給 train.py --from-json。")
+                     ? "MediaPipe 節點存在本機 mediapipe.realm。標好／壞並上傳成功後，可在 Mac 用 --from-api 拉雲端資料（不必匯出 JSON）；本機有標註時也可按「匯出 JSON」。"
+                     : "標記好／壞並上傳成功後，優先用 --from-api；無法分享檔案時不必匯出 JSON。")
             }
 
             if canLabel {
