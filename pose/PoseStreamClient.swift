@@ -35,7 +35,7 @@ struct LivePrediction {
     var hudText: String {
         if let note { return "即時預測：\(note)" }
         guard let label else { return "即時預測：—" }
-        let pct = Int(confidencePercent)
+        let pct = Int(confidencePercent.rounded())
         return "即時預測：\(label == "good" ? "好" : "壞") \(pct)%"
     }
 
