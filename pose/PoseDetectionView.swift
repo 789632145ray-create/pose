@@ -2204,12 +2204,12 @@ private struct PoseDatabaseSheet: View {
     @State private var didCopyCloudCommand = false
 
     private var cloudDiagnoseCommand: String {
-        let engine = database.kind == .mediaPipe ? "mediapipe" : "pose"
+        // 一律 all：節點資料庫上傳在 /poses，MediaPipe 在 mediapipe_sessions；只查一邊容易變成 0 筆。
         let user = auth.username ?? "<你的帳號>"
         let base = ServerConfig.baseURL
         return """
         cd backend && source .venv/bin/activate
-        python diagnose_quality_model.py --engine \(engine) --from-api \(base) --username \(user) --save-json training_from_api.json
+        python diagnose_quality_model.py --engine all --from-api \(base) --username \(user) --save-json training_from_api.json
         """
     }
 

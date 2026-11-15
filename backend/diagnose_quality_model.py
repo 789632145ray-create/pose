@@ -12,11 +12,11 @@
 
 使用（不必先有手機匯出的 JSON；優先 --from-api）：
   cd backend && source .venv/bin/activate
-  python diagnose_quality_model.py --engine mediapipe \\
+  # App「節點資料庫」上傳走 /poses；MediaPipe 庫才是 mediapipe。不確定就用 all。
+  python diagnose_quality_model.py --engine all \\
     --from-api https://runpose-backend-production.up.railway.app \\
     --username 你的帳號 --save-json training_from_api.json
-  # 密碼可用參數 --password，或環境變數 POSE_API_PASSWORD
-  python diagnose_quality_model.py --engine mediapipe --from-json export.json
+  # 密碼：--password 或環境變數 POSE_API_PASSWORD
 """
 
 from __future__ import annotations
@@ -98,7 +98,11 @@ def _maybe_save_api_json(args: argparse.Namespace, sessions: list[dict]) -> None
 
 
 def load_xy(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray, str]:
-    """與 train.py 相同資料來源；若沒有標註資料則退回合成樣本。"""
+    """與 train.py 相同資料來源。
+
+    注意：--from-api 若回傳 0 筆，預設直接失敗（不再默默改用合成資料），
+    避免「其實雲端有資料、只是 engine／帳號錯了」被誤判成沒東西。
+    """
     from train import fetch_docs_from_api, rows_from_docs
 
     engine = args.engine
@@ -116,7 +120,20 @@ def load_xy(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray, str]:
         sessions = fetch_docs_from_api(args.from_api, username, password, engine)
         _maybe_save_api_json(args, sessions)
         X, y = rows_from_docs(sessions)
-        source = f"api:{args.from_api}"
+        source = f"api:{args.from_api}/engine={engine}/user={username}"
+        if len(sessions) == 0:
+            raise RuntimeError(
+                f"雲端帳號「{username}」在 engine={engine} 下沒有已標註 session。\n"
+                "截圖若是「節點資料庫／偵測詳情」且已上傳成功，資料在 /poses，請改：\n"
+                f"  python diagnose_quality_model.py --engine all --from-api {args.from_api} "
+                f"--username {username} --save-json training_from_api.json\n"
+                "並確認登入的是同一個帳號（上傳成功那組）。"
+            )
+        if len(X) == 0 and sessions:
+            raise RuntimeError(
+                f"雲端有 {len(sessions)} 筆 session，但沒有可用的 good/bad 特徵列（可能 frames 為空）。"
+            )
+        return X, y, source
     else:
         try:
             X, y = load_dataset(engine)
@@ -125,17 +142,25 @@ def load_xy(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray, str]:
             print(f"[資料] Mongo 無法使用（{exc}）。")
             print(
                 "若資料已上傳 Railway，請改用（不必 JSON）：\n"
-                "  python diagnose_quality_model.py --engine mediapipe \\\n"
+                "  python diagnose_quality_model.py --engine all \\\n"
                 "    --from-api https://runpose-backend-production.up.railway.app \\\n"
                 "    --username 你的帳號 --save-json training_from_api.json"
             )
+            if not args.allow_synthetic:
+                raise RuntimeError("未加 --allow-synthetic，不改用合成資料。") from exc
             print("暫時改用合成 10 筆做過擬合檢查。")
             X, y = rows_from_docs(_synthetic_docs(OVERFIT_N))
             source = "synthetic"
             return X, y, source
 
     if len(X) == 0:
-        print("[資料] 沒有已標註樣本。若你只在手機標過但本機沒檔案，請改用 --from-api。")
+        print("[資料] 沒有已標註樣本。")
+        if args.from_json:
+            raise RuntimeError("JSON 裡沒有 good/bad 標註列。")
+        if not args.allow_synthetic:
+            raise RuntimeError(
+                "沒有訓練列。請改用 --from-api --engine all，或加 --allow-synthetic 只測過擬合管線。"
+            )
         print("暫時改用合成 10 筆做過擬合檢查。")
         X, y = rows_from_docs(_synthetic_docs(OVERFIT_N))
         source = "synthetic"
@@ -342,7 +367,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # 重用 train.py 的資料來源參數，再加診斷專用開關。
     base = parse_train_args([])
     parser = argparse.ArgumentParser(description="診斷姿勢品質模型前處理／標籤／過擬合")
-    parser.add_argument("--engine", choices=("pose", "mediapipe", "all"), default=base.engine)
+    parser.add_argument(
+        "--engine",
+        choices=("pose", "mediapipe", "all"),
+        default="all",
+        help="預設 all（節點資料庫=/poses 與 MediaPipe 一併拉）。只查 mediapipe 容易變成 0 筆。",
+    )
     parser.add_argument("--from-api", metavar="URL", default=None)
     parser.add_argument("--username", default=None)
     parser.add_argument("--password", default=None)
@@ -353,14 +383,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="搭配 --from-api：把雲端 sessions 另存成本地 JSON（之後就不必再匯出手機檔）",
     )
+    parser.add_argument(
+        "--allow-synthetic",
+        action="store_true",
+        help="本機／雲端都沒資料時，才允許用合成 10 筆跑過擬合（預設關閉，避免誤判）",
+    )
     parser.add_argument("--overfit-n", type=int, default=OVERFIT_N)
     parser.add_argument("--epochs", type=int, default=OVERFIT_EPOCHS)
     parser.add_argument("--json-out", metavar="FILE", help="把診斷結果寫成 JSON")
+    # 讓未使用的 train 預設不干擾
+    _ = base
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    # 無 --from-api／--from-json 且未允許合成時，直接提示正確指令（桌面空檔／錯 engine 是常見原因）。
+    if not args.from_api and not args.from_json and not args.allow_synthetic:
+        print(
+            "請用雲端帳號拉已上傳的標註（不必手機 JSON）：\n"
+            "  python diagnose_quality_model.py --engine all \\\n"
+            "    --from-api https://runpose-backend-production.up.railway.app \\\n"
+            "    --username 你的帳號 --password 你的密碼 --save-json training_from_api.json\n"
+            "若檔案是 0 byte／打不開，請先 git checkout cursor/diagnose-quality-model-b192。"
+        )
+        return 1
+
     preprocess = check_train_infer_preprocess()
 
     try:

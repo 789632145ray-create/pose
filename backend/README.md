@@ -131,10 +131,14 @@ python train.py --engine mediapipe --from-json mediapipe_training_export.json
 **不必先匯出手機 JSON。** 資料若已上傳 Railway，用帳號從雲端拉即可：
 
 ```bash
-python diagnose_quality_model.py --engine mediapipe \
+# 先拉取含 diagnose_quality_model.py 的分支（桌面若是 0-byte 空檔代表還沒拉到）
+# git fetch && git checkout cursor/diagnose-quality-model-b192
+
+python diagnose_quality_model.py --engine all \
   --from-api https://runpose-backend-production.up.railway.app \
   --username 你的帳號 --save-json training_from_api.json
 # 密碼：--password 或環境變數 POSE_API_PASSWORD
+# 注意：App「節點資料庫」上傳是 /poses；只用 --engine mediapipe 會變成 0 筆。
 ```
 
 會依序檢查：(1) train／inference 前處理是否一致、(2) Labels 數量比例、(3) 取 10 筆做 MLP 100 Epochs 過擬合（目標信心 ≥ 0.99）。線上仍是 RandomForest；Epoch 檢查只用來排除特徵／Loss 寫錯。`--save-json` 會順便留下本機 JSON，之後可用 `--from-json` 重跑。
