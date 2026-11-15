@@ -48,6 +48,18 @@ final class SummaryStore: ObservableObject {
         reload()
     }
 
+    /// 更新既有摘要條列（例如品質辨識完成後覆寫舊的即時信心度）。
+    func updateLines(id: UUID, lines: [String]) {
+        guard let realm = try? PoseRealm.open(),
+              let obj = realm.object(ofType: RLMSavedSummary.self, forPrimaryKey: id.uuidString)
+        else { return }
+        try? realm.write {
+            obj.lines.removeAll()
+            obj.lines.append(objectsIn: lines)
+        }
+        reload()
+    }
+
     func remove(at offsets: IndexSet) {
         guard let realm = try? PoseRealm.open() else { return }
         let ids = offsets.compactMap { items.indices.contains($0) ? items[$0].id.uuidString : nil }

@@ -1164,17 +1164,16 @@ struct PoseDetectionView: View {
     }
 
     @MainActor
-    private func buildSummaryLinesForHistory() -> [String] {
+    private func buildSummaryLinesForHistory(includeQuality: Bool = true) -> [String] {
         var lines = analysisPipeline.videoSummary()
-        if assessmentEngine.usesQualityPredict,
-           let pred = videoQualityResult ?? livePrediction,
+        guard includeQuality, assessmentEngine.usesQualityPredict else { return lines }
+        if let pred = videoQualityResult ?? livePrediction,
            pred.note == nil,
            let label = pred.label {
-            let pct = Int(pred.confidencePercent)
+            let pct = Int(pred.confidencePercent.rounded())
             let qualityLine = "模型辨識：姿勢「\(label == "good" ? "好" : "壞")」（信心 \(pct)%）"
-            if !lines.contains(where: { $0.hasPrefix("模型辨識：") }) {
-                lines.insert(qualityLine, at: 0)
-            }
+            lines.removeAll { $0.hasPrefix("模型辨識：") }
+            lines.insert(qualityLine, at: 0)
         }
         return lines
     }
@@ -1434,14 +1433,19 @@ struct PoseDetectionView: View {
         }
         videoQualityResult = resolved
         isAnalyzingVideoQuality = false
+        // 摘要卡片與條列必須同一筆結果；覆寫先前即時預測寫入的「模型辨識」行。
+        summaryLines.removeAll { $0.hasPrefix("模型辨識：") }
         if let resolved, resolved.note == nil, let label = resolved.label {
-            let pct = Int(resolved.confidencePercent)
+            let pct = Int(resolved.confidencePercent.rounded())
             let qualityLine = "模型辨識：姿勢「\(label == "good" ? "好" : "壞")」（信心 \(pct)%）"
-            if !summaryLines.contains(where: { $0.hasPrefix("模型辨識：") }) {
-                summaryLines.insert(qualityLine, at: 0)
-            }
+            summaryLines.insert(qualityLine, at: 0)
         }
-        autoSaveSummaryToHistory()
+        // 若歷史已先存過舊信心度，更新同一筆摘要。
+        if historySavedForSession, let id = lastSavedID {
+            summaryStore.updateLines(id: id, lines: summaryLines.isEmpty ? buildSummaryLinesForHistory() : summaryLines)
+        } else {
+            autoSaveSummaryToHistory()
+        }
     }
 
     /// 影片暫停後用已截下的影格做品質辨識，並打開摘要。
@@ -1852,8 +1856,9 @@ struct PoseDetectionView: View {
 
         // 影片模式：暫停即自動產生並顯示分析摘要（先截資料再 teardown）。
         if case .video = detectionSource, engineAttached {
+            // 先不要寫入即時預測信心度；等整段品質辨識完成後再統一寫入，避免卡片與條列不一致。
             if analysisPipeline.hasEvaluatedFrames {
-                summaryLines = buildSummaryLinesForHistory()
+                summaryLines = buildSummaryLinesForHistory(includeQuality: false)
             }
             let fallbackQuality = videoQualityResult ?? livePrediction
             pauseDetectionProcessing(fullReset: true, preserveAnalysis: true)
@@ -1920,7 +1925,7 @@ struct PoseDetectionView: View {
                 .foregroundStyle(.yellow)
         } else if let label = result.label {
             let isGood = label == "good"
-            let pct = Int(result.confidencePercent)
+            let pct = Int(result.confidencePercent.rounded())
             if compact {
                 Text("品質：\(isGood ? "好" : "壞") \(pct)%")
                     .font(.caption.weight(.bold))
@@ -2052,7 +2057,7 @@ private struct VideoSummarySheet: View {
                             Text(isGood ? "姿勢：好" : "姿勢：壞")
                                 .font(.title.weight(.bold))
                                 .foregroundStyle(isGood ? .green : .red)
-                            Text(String(format: "模型信心度：%.0f%%", result.confidencePercent))
+                            Text("模型信心度：\(Int(result.confidencePercent.rounded()))%")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
