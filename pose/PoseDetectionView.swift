@@ -739,37 +739,43 @@ struct PoseDetectionView: View {
         }
     }
 
-    /// 底部固定高度區塊，避免偵測中文字變多時整片介面上下跳動。
+    /// 底部固定高度區塊；內容可垂直滑動，避免選項變多後資料庫／選影片被裁切。
     @MainActor
     private func bottomPanel(height panelHeight: CGFloat, safeBottom: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            DetectionEnginePickerRow()
-            // 僅「自訓模型」顯示：選 QuickPose 或 MediaPipe 的自訓品質模型／資料庫。
-            if assessmentEngine == .trainedModel {
-                SkeletonModelPickerRow()
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("向下滑動可看到資料庫與選影片")
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.55))
+                    .frame(maxWidth: .infinity, alignment: .center)
+
+                DetectionEnginePickerRow()
+                // 僅「自訓模型」顯示：選 QuickPose 或 MediaPipe 的自訓品質模型／資料庫。
+                if assessmentEngine == .trainedModel {
+                    SkeletonModelPickerRow()
+                }
+                GaitActivityPickerRow()
+                CaptureViewPickerRow()
+                bottomControls
+
+                Button {
+                    showDatabase = true
+                } label: {
+                    Label("\(nodeDatabase.kind.buttonTitle)（本次 \(quickPoseEngine.dbNodeCount) 筆）", systemImage: "cylinder.split.1x2.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                }
+                .buttonStyle(.bordered)
+                .tint(.teal)
+
+                bottomAdviceSection
+                bottomStepsSection
             }
-            GaitActivityPickerRow()
-            CaptureViewPickerRow()
-            bottomControls
-
-            Button {
-                showDatabase = true
-            } label: {
-                Label("\(nodeDatabase.kind.buttonTitle)（本次 \(quickPoseEngine.dbNodeCount) 筆）", systemImage: "cylinder.split.1x2.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-            }
-            .buttonStyle(.bordered)
-            .tint(.teal)
-
-            Spacer(minLength: 0)
-
-            bottomAdviceSection
-            bottomStepsSection
+            .padding(12)
+            .padding(.bottom, max(safeBottom, 12))
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(12)
-        .padding(.bottom, safeBottom)
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: panelHeight + safeBottom, alignment: .top)
         .background(.black.opacity(0.65))
@@ -778,24 +784,20 @@ struct PoseDetectionView: View {
 
     @MainActor
     private var bottomAdviceSection: some View {
+        // 外層已可滑動，這裡不再嵌套 ScrollView，避免手勢衝突。
         VStack(alignment: .leading, spacing: 4) {
             Text(assessmentEngine.adviceSectionTitle)
                 .font(.headline)
                 .foregroundStyle(.white)
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(quickPoseEngine.adviceLines.enumerated()), id: \.offset) { _, line in
-                        Text("• \(line)")
-                            .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.95))
-                            .multilineTextAlignment(.leading)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            ForEach(Array(quickPoseEngine.adviceLines.enumerated()), id: \.offset) { _, line in
+                Text("• \(line)")
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.95))
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .frame(height: 88, alignment: .top)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @MainActor
@@ -805,20 +807,15 @@ struct PoseDetectionView: View {
             Text("每一步")
                 .font(.headline)
                 .foregroundStyle(.white)
-            ScrollView(.vertical, showsIndicators: false) {
-                Group {
-                    if quickPoseEngine.recentSteps.isEmpty {
-                        Text("尚無步數紀錄")
-                            .font(.caption)
-                            .foregroundStyle(.white.opacity(0.45))
-                    } else {
-                        stepEventList
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if quickPoseEngine.recentSteps.isEmpty {
+                Text("尚無步數紀錄")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.45))
+            } else {
+                stepEventList
             }
         }
-        .frame(height: 100, alignment: .top)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @MainActor
@@ -1655,12 +1652,12 @@ struct PoseDetectionView: View {
     private func cameraBottomPanelHeight(for height: CGFloat) -> CGFloat {
         let ratio: CGFloat = {
             switch detectionSource {
-            case .video: return 0.50
-            case .liveCamera: return 0.46
+            case .video: return 0.52
+            case .liveCamera: return 0.48
             }
         }()
-        // 多一列「骨架模型」；上限略降，留給上方「隱藏」鈕可見空間。
-        return min(max(height * ratio, 380), 480)
+        // 選項變多後靠 ScrollView 捲動；高度給足可見區，其餘滑下去找資料庫／選影片。
+        return min(max(height * ratio, 360), 520)
     }
 
     @ViewBuilder
