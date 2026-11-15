@@ -3,7 +3,7 @@
 //  pose
 //
 //  背面視角（Back View）姿勢處理與特徵提取：
-//  1) 關鍵點分級信心過濾（核心 >= 0.7，手臂 >= 0.4／可忽略）
+//  1) 關鍵點分級信心過濾（核心 >= 0.7，手臂 >= 0.25／可忽略）
 //  2) 中值濾波抑制左右互換與單幀抖動
 //  3) 骨盆原點＋軀幹尺度正規化
 //  4) 骨盆傾斜／軀幹側傾／肩水平／膝內夾代理／步態對稱
@@ -62,7 +62,7 @@ final class BackViewPosePipeline {
     ]
 
     var coreConfidenceThreshold: Double = 0.7
-    var armConfidenceThreshold: Double = 0.4
+    var armConfidenceThreshold: Double = 0.25
     /// 中值濾波視窗（建議 3~5）。
     var medianWindow: Int = 5
     /// 連續超過門檻的幀數才觸發異常。
@@ -145,8 +145,8 @@ final class BackViewPosePipeline {
                 continue
             }
 
-            // 其餘（耳、口等）：中等門檻，供頭部推估。
-            if conf >= 0.4 {
+            // 其餘（耳、口等）：略寬門檻，供頭部推估。
+            if conf >= 0.25 {
                 out[joint] = node
                 lastTrusted[joint] = node
             } else if let prev = lastTrusted[joint] {

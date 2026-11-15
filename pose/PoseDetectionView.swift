@@ -43,8 +43,8 @@ final class QuickPoseEngine: ObservableObject {
     var bodyGaitProfile: BodyGaitProfile?
     var onStreamEnqueue: (([PoseNode], TimeInterval) -> Void)?
     var onStepEvents: (([StepEvent]) -> Void)?
-    /// 遮擋關節：手臂 < 0.4、核心 < 0.7 不直接採計，延遲一幀以前後可信點插值補齊。
-    private let jointConfidenceFilter = JointConfidenceFilter(threshold: 0.4, coreThreshold: 0.7)
+    /// 遮擋關節：手臂 < 0.25、核心 < 0.7 不直接採計，延遲一幀以前後可信點插值補齊。
+    private let jointConfidenceFilter = JointConfidenceFilter(threshold: 0.25, coreThreshold: 0.7)
     /// 背面視角特徵管線（正規化、生物力學指標、防抖提醒）。
     let backViewPipeline = BackViewPosePipeline()
 
@@ -174,7 +174,7 @@ final class QuickPoseEngine: ObservableObject {
                     mergedLines.append(contentsOf: gait.lines)
                 }
                 // 寫入／串流使用定稿幀（手臂等低信心關節已插值或丟棄）。
-                let nodes = stabilized ?? (rawNodes ?? []).filter { $0.confidenceScore >= 0.4 }
+                let nodes = stabilized ?? (rawNodes ?? []).filter { $0.confidenceScore >= 0.25 }
                 let backFeatures = backViewPipeline.process(nodes: nodes)
                 var finalLines = mergedLines
                 if backFeatures.coreReliable || !backFeatures.adviceLines.isEmpty {

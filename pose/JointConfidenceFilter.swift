@@ -36,7 +36,7 @@ extension PoseNode {
 /// 即時關節穩定器：低信心關節延遲一幀，用前後可信座標線性插值補齊。
 @MainActor
 final class JointConfidenceFilter {
-    /// 手臂關節信心門檻（背面擺臂易遮擋，預設 0.4）。
+    /// 手臂關節信心門檻（背面擺臂易遮擋，預設 0.25）。
     var threshold: Double
     /// 核心穩定區（肩／髖／膝／踝）門檻（背面預設 0.7）。
     var coreThreshold: Double
@@ -56,7 +56,7 @@ final class JointConfidenceFilter {
     private var buffered: [PoseNode]?
     private var lastTrusted: [String: PoseNode] = [:]
 
-    init(threshold: Double = 0.4, coreThreshold: Double = 0.7) {
+    init(threshold: Double = 0.25, coreThreshold: Double = 0.7) {
         self.threshold = threshold
         self.coreThreshold = coreThreshold
     }
@@ -93,7 +93,7 @@ final class JointConfidenceFilter {
         if Self.armJoints.contains(node.joint) {
             return score >= threshold
         }
-        return score >= 0.4
+        return score >= 0.25
     }
 
     private func finalize(frame: [PoseNode], nextFrame: [PoseNode]) -> [PoseNode] {
