@@ -49,6 +49,11 @@ struct AppMenuSheet: View {
 
     private var actionsSection: some View {
         Section {
+            NavigationLink {
+                UserGuideView()
+            } label: {
+                Label("使用說明", systemImage: "book.pages")
+            }
             Button(action: onHistory) {
                 Label("歷史紀錄", systemImage: "clock.arrow.circlepath")
             }
