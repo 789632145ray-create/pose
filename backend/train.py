@@ -10,7 +10,7 @@
      - 關節座標取 mean／std；生物力學角度取 mean／std／min／max
   3. 以與推論相同的 window_size／stride 切時間窗，擴增樣本並對齊分布。
   4. GroupShuffleSplit（依 session id）避免同影片洩漏到測試集。
-  5. 僅對訓練集做水平翻轉增強；GradientBoosting + 機率校準後印出訓練／測試報告與正確樣本平均信心度。
+  5. 僅對訓練集做水平翻轉增強；GradientBoosting（balanced sample_weight）後印出訓練／測試報告、bad recall 與正確樣本平均信心度。
 
 使用：
   python train.py                         # → pose_quality_model.joblib
@@ -33,10 +33,10 @@ import joblib
 import numpy as np
 from mongo_util import describe_mongo_url_problem, make_mongo_client, mongo_url_help
 from pymongo.errors import ConfigurationError
-from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score, classification_report, recall_score
 from sklearn.model_selection import GroupShuffleSplit
+from sklearn.utils.class_weight import compute_sample_weight
 
 MONGO_URL = os.environ.get("POSE_MONGO_URL", "mongodb://localhost:27017")
 MONGO_DB_NAME = os.environ.get("POSE_MONGO_DB", "pose")
@@ -742,29 +742,26 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001 — 增強失敗不阻斷訓練
         print(f"水平翻轉增強略過：{exc}")
 
-    base = GradientBoostingClassifier(
+    model = GradientBoostingClassifier(
         n_estimators=150,
         learning_rate=0.05,
         max_depth=4,
         random_state=42,
     )
-    min_class_train = min(int((y_train == 1).sum()), int((y_train == 0).sum()))
-    if min_class_train >= 3:
-        cv_folds = min(3, min_class_train)
-        model = CalibratedClassifierCV(base, method="sigmoid", cv=cv_folds)
-        classifier_name = f"CalibratedClassifierCV(GradientBoosting, sigmoid, cv={cv_folds})"
-    else:
-        model = base
-        classifier_name = "GradientBoostingClassifier"
+    classifier_name = "GradientBoostingClassifier(sample_weight=balanced)"
+    sample_weight = compute_sample_weight("balanced", y_train)
     print(f"訓練模型：{classifier_name}")
-    model.fit(X_train, y_train)
+    model.fit(X_train, y_train, sample_weight=sample_weight)
 
     pred_train = model.predict(X_train)
     pred_test = model.predict(X_test)
+    test_acc = accuracy_score(y_test, pred_test)
+    bad_recall = recall_score(y_test, pred_test, pos_label=0, zero_division=0)
     print(f"\n訓練集準確率：{accuracy_score(y_train, pred_train):.3f}")
     print("訓練集分類報告：")
     print(classification_report(y_train, pred_train, target_names=["bad", "good"], zero_division=0))
-    print(f"測試集準確率：{accuracy_score(y_test, pred_test):.3f}")
+    print(f"測試集準確率：{test_acc:.3f}")
+    print(f"測試集 bad recall：{bad_recall:.3f}")
     print("測試集分類報告：")
     print(classification_report(y_test, pred_test, target_names=["bad", "good"], zero_division=0))
 
@@ -790,6 +787,8 @@ def main(argv: list[str] | None = None) -> int:
             "n_features": len(FEATURE_COLUMNS),
             "classifier": classifier_name,
             "mean_correct_confidence": mean_correct_conf,
+            "test_accuracy": float(test_acc),
+            "test_bad_recall": float(bad_recall),
         },
         out_model,
     )
