@@ -4,7 +4,7 @@
 //
 //  偵測系統版本（三種都走完整管線：相機／影片、節點庫、標好壞）：
 //  - QuickPose：輕量骨架 + 規則建議
-//  - MediaPipe：BlazePose Full 骨架 + 規則建議／步態分析
+//  - MediaPipe：相機走 Google Pose Landmarker 原生抓關節；影片暫仍 QuickPose 管線
 //  - 自訓模型：後端 RandomForest 好／壞品質辨識
 //
 
@@ -28,9 +28,9 @@ enum PoseAssessmentEngine: String, CaseIterable, Identifiable, Codable {
     var subtitle: String {
         switch self {
         case .quickPose:
-            return "輕量骨架 + 規則建議（肩膀、骨盆、頭部）"
+            return "QuickPose SDK 骨架 + 規則建議"
         case .mediaPipe:
-            return "MediaPipe Full 骨架 + 規則建議（較精準）"
+            return "Google MediaPipe Pose Landmarker 原生抓關節"
         case .trainedModel:
             return "後端 RandomForest 好／壞品質辨識"
         }
@@ -41,7 +41,7 @@ enum PoseAssessmentEngine: String, CaseIterable, Identifiable, Codable {
         case .quickPose:
             return "完整偵測畫面：相機／影片、步態、節點庫、標好／壞"
         case .mediaPipe:
-            return "MediaPipe BlazePose Full 骨架、步態分析與規則建議"
+            return "相機使用 Google MediaPipeTasksVision 原生偵測；寫入 mediapipe.realm"
         case .trainedModel:
             return "步態分析、節點資料庫、雲端品質模型"
         }
@@ -88,12 +88,12 @@ enum PoseAssessmentEngine: String, CaseIterable, Identifiable, Codable {
         self == .mediaPipe ? "mediapipe" : "pose"
     }
 
-    /// 三種引擎共用同一個已啟動的 QuickPose Full 工作階段畫骨架線。
+    /// QuickPose／自訓仍共用 QuickPose Full；MediaPipe 相機改走原生 Landmarker。
     var usesFullPoseModel: Bool { true }
 
-    /// 切換引擎只改分析／資料庫／是否呼叫 /predict。stop/start 會讓 overlay 線條只在第一個引擎出現。
-    static func requiresPoseRuntimeRestart(from _: PoseAssessmentEngine, to _: PoseAssessmentEngine) -> Bool {
-        false
+    /// 進出 MediaPipe 需切換相機 runtime（QuickPose ↔ 原生 MediaPipe）。
+    static func requiresPoseRuntimeRestart(from: PoseAssessmentEngine, to: PoseAssessmentEngine) -> Bool {
+        (from == .mediaPipe) != (to == .mediaPipe)
     }
 
     var hudBadgeTitle: String {

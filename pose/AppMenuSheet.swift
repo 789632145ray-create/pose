@@ -73,7 +73,7 @@ struct AppMenuSheet: View {
         } header: {
             Text("偵測引擎（3 種）")
         } footer: {
-            Text("QuickPose 為官方 overlay；MediaPipe 為 BlazePose Full 骨架；自訓模型會連雲端辨識。")
+            Text("QuickPose 為官方 overlay；MediaPipe 相機使用 Google Pose Landmarker 原生抓關節；自訓模型會連雲端辨識。")
         }
     }
 

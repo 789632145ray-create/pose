@@ -55,7 +55,7 @@
 | 引擎 | 說明 |
 |------|------|
 | QuickPose | 官方 overlay，規則建議 |
-| MediaPipe | BlazePose Full；可品質辨識；寫入 `mediapipe.realm` |
+| MediaPipe | **相機**使用 Google MediaPipe Pose Landmarker 原生抓關節；寫入 `mediapipe.realm`（影片暫仍走 QuickPose 管線） |
 | 自訓模型 | 雲端好／壞辨識；可再選 QuickPose／MediaPipe 骨架路徑；需登入 |
 
 ---

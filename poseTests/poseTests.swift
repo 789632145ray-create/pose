@@ -70,18 +70,44 @@ final class poseTests: XCTestCase {
         ))
     }
 
-    func testSwitchingEnginesKeepsSharedPoseRuntime() {
+    func testSwitchingEnginesPoseRuntimeRestartRules() {
         XCTAssertTrue(PoseAssessmentEngine.quickPose.usesFullPoseModel)
         XCTAssertTrue(PoseAssessmentEngine.mediaPipe.usesFullPoseModel)
         XCTAssertTrue(PoseAssessmentEngine.trainedModel.usesFullPoseModel)
-        for from in PoseAssessmentEngine.allCases {
-            for to in PoseAssessmentEngine.allCases where from != to {
-                XCTAssertFalse(
-                    PoseAssessmentEngine.requiresPoseRuntimeRestart(from: from, to: to),
-                    "\(from.rawValue) → \(to.rawValue) must keep the running overlay session"
+        // QuickPose ↔ 自訓仍共用 QuickPose overlay，不必重啟。
+        XCTAssertFalse(PoseAssessmentEngine.requiresPoseRuntimeRestart(from: .quickPose, to: .trainedModel))
+        XCTAssertFalse(PoseAssessmentEngine.requiresPoseRuntimeRestart(from: .trainedModel, to: .quickPose))
+        // 進出 MediaPipe 需切換原生 Landmarker ↔ QuickPose。
+        XCTAssertTrue(PoseAssessmentEngine.requiresPoseRuntimeRestart(from: .quickPose, to: .mediaPipe))
+        XCTAssertTrue(PoseAssessmentEngine.requiresPoseRuntimeRestart(from: .mediaPipe, to: .quickPose))
+        XCTAssertTrue(PoseAssessmentEngine.requiresPoseRuntimeRestart(from: .trainedModel, to: .mediaPipe))
+        XCTAssertTrue(PoseAssessmentEngine.requiresPoseRuntimeRestart(from: .mediaPipe, to: .trainedModel))
+    }
+
+    func testMediaPipeLandmarkMapperBuildsNodesAndSnapshot() {
+        var samples: [MediaPipeLandmarkMapper.LandmarkSample] = []
+        for i in 0..<33 {
+            samples.append(
+                MediaPipeLandmarkMapper.LandmarkSample(
+                    x: Double(i) / 100,
+                    y: Double(i) / 80,
+                    z: 0.01,
+                    visibility: 0.9,
+                    presence: 0.9
                 )
-            }
+            )
         }
+        let nodes = MediaPipeLandmarkMapper.nodes(from: samples)
+        XCTAssertGreaterThanOrEqual(nodes.count, 33)
+        XCTAssertTrue(nodes.contains(where: { $0.joint == "nose" }))
+        XCTAssertTrue(nodes.contains(where: { $0.joint == "left_ankle" }))
+        XCTAssertTrue(nodes.contains(where: { $0.joint == "shoulder_mid" }))
+        XCTAssertTrue(nodes.contains(where: { $0.joint == "hip_mid" }))
+        let frame = MediaPipeLandmarkMapper.keypointFrame(from: nodes)
+        XCTAssertNotNil(frame.leftHip)
+        XCTAssertNotNil(frame.rightAnkle)
+        let snapshot = MediaPipeLandmarkMapper.walkingSnapshot(from: nodes)
+        XCTAssertGreaterThan(snapshot.leftShoulder.visibility, 0.5)
     }
 
     func testWalkingFormCorePrincipleLines() {

@@ -189,7 +189,7 @@ private struct EngineChooserSheet: View {
                 } header: {
                     Text("請選擇偵測引擎")
                 } footer: {
-                    Text("三種引擎都可相機／上傳影片，並把節點標好／壞上傳。自訓模型可再選 QuickPose／MediaPipe 骨架；MediaPipe 引擎寫入 mediapipe.realm，其餘寫入 pose.realm。")
+                    Text("三種引擎都可相機／上傳影片，並把節點標好／壞上傳。自訓模型可再選 QuickPose／MediaPipe 骨架；MediaPipe 引擎相機走原生 Landmarker 並寫入 mediapipe.realm，其餘寫入 pose.realm。")
                 }
             }
             .navigationTitle("偵測引擎")

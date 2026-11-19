@@ -353,6 +353,19 @@ final class PoseAnalysisPipeline {
 
     /// 對單一幀做：低通 → 骨盆歸一 → 左右腳踝獨立步偵測；同時累積問題次數。
     func process(landmarks: QuickPose.Landmarks, lines: [String], issues: Set<PoseIssueCode>) -> PoseStepFrameResult {
+        if !suppressSagittalFormAdvice {
+            gaitMetrics.ingest(landmarks: landmarks, profile: bodyProfile, activity: activityMode)
+        }
+        return process(keypointFrame: PoseKeypointExtractor.extract(landmarks), lines: lines, issues: issues)
+    }
+
+    /// MediaPipe 原生路徑：已轉成關鍵點幀，不再依賴 QuickPose.Landmarks。
+    func process(
+        keypointFrame: PoseKeypointFrame,
+        lines: [String],
+        issues: Set<PoseIssueCode>,
+        formSnapshot: WalkingFormSnapshot? = nil
+    ) -> PoseStepFrameResult {
         totalEvaluatedFrames += 1
         let countedIssues = suppressSagittalFormAdvice
             ? issues.subtracting(PoseIssueCode.sagittalPlaneCodes)
@@ -360,11 +373,15 @@ final class PoseAnalysisPipeline {
         for code in countedIssues {
             issueCounts[code, default: 0] += 1
         }
-        if !suppressSagittalFormAdvice {
-            gaitMetrics.ingest(landmarks: landmarks, profile: bodyProfile, activity: activityMode)
+        if !suppressSagittalFormAdvice, let formSnapshot {
+            switch activityMode {
+            case .walking:
+                WalkingFormAdvisor.accumulate(metrics: &gaitMetrics, snapshot: formSnapshot)
+            case .running:
+                RunningFormAdvisor.accumulate(metrics: &gaitMetrics, snapshot: formSnapshot)
+            }
         }
-        let raw = PoseKeypointExtractor.extract(landmarks)
-        let smoothed = lowPass.pushAndAverage(raw)
+        let smoothed = lowPass.pushAndAverage(keypointFrame)
 
         var leftRel: Double?
         var rightRel: Double?
