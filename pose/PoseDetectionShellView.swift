@@ -30,16 +30,18 @@ enum PoseSkeletonModel: String, CaseIterable, Identifiable {
     }
 }
 
-/// 拍攝視角：背面管線（信心分級、背面特徵）只在「背面」啟用。
+/// 拍攝視角：背面／側面特徵管線各自只在對應模式啟用。
 enum PoseCaptureViewMode: String, CaseIterable, Identifiable {
     case front
+    case side
     case back
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .front: return "正面／側面"
+        case .front: return "正面"
+        case .side: return "側面"
         case .back: return "背面"
         }
     }
@@ -47,6 +49,7 @@ enum PoseCaptureViewMode: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .front: return "person.fill"
+        case .side: return "arrow.left.and.right"
         case .back: return "person.fill.turn.right"
         }
     }
@@ -93,6 +96,7 @@ final class DetectionModeStore: ObservableObject {
     }
 
     var isBackView: Bool { captureView == .back }
+    var isSideView: Bool { captureView == .side }
 }
 
 struct PoseDetectionShellView: View {
@@ -305,7 +309,7 @@ struct CaptureViewPickerRow: View {
                         .padding(.vertical, 8)
                     }
                     .buttonStyle(.bordered)
-                    .tint(selected ? (mode == .back ? .mint : .cyan) : .gray)
+                    .tint(selected ? captureTint(mode) : .gray)
                     .accessibilityLabel(mode.title)
                     .accessibilityAddTraits(selected ? .isSelected : [])
                 }
@@ -314,7 +318,19 @@ struct CaptureViewPickerRow: View {
                 Text("背面模式：啟用背面特徵、手臂低信心門檻與耳－肩頭部推估。")
                     .font(.caption2)
                     .foregroundStyle(.white.opacity(0.65))
+            } else if modeStore.isSideView {
+                Text("側面模式：朝向翻轉正規化、只採近側肢體，並計算前傾／膝角／跨步過度等特徵。")
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.65))
             }
+        }
+    }
+
+    private func captureTint(_ mode: PoseCaptureViewMode) -> Color {
+        switch mode {
+        case .back: return .mint
+        case .side: return .orange
+        case .front: return .cyan
         }
     }
 }
