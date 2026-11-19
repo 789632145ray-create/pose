@@ -31,6 +31,30 @@ struct LivePrediction {
     let label: String?          // "good" / "bad" / nil
     let probabilityGood: Double
     let note: String?           // 例如「尚未訓練模型」
+    /// 影片級聚合後的最終標籤（若有）。
+    let finalLabel: String?
+    /// 影片級代表性信心 0~1（若有；App 可 ×100 顯示）。
+    let finalConfidence: Double?
+    let dominanceRatio: Double?
+    let validSamplesCount: Int?
+
+    init(
+        label: String?,
+        probabilityGood: Double,
+        note: String?,
+        finalLabel: String? = nil,
+        finalConfidence: Double? = nil,
+        dominanceRatio: Double? = nil,
+        validSamplesCount: Int? = nil
+    ) {
+        self.label = label
+        self.probabilityGood = probabilityGood
+        self.note = note
+        self.finalLabel = finalLabel
+        self.finalConfidence = finalConfidence
+        self.dominanceRatio = dominanceRatio
+        self.validSamplesCount = validSamplesCount
+    }
 
     var hudText: String {
         if let note { return "即時預測：\(note)" }
@@ -39,18 +63,22 @@ struct LivePrediction {
         return "即時預測：\(label == "good" ? "好" : "壞") \(pct)%"
     }
 
-    var isGood: Bool { label == "good" }
+    var isGood: Bool { (finalLabel ?? label) == "good" }
 
-    /// 預測為該標籤的信心百分比（0–100）。
+    /// 預測為該標籤的信心百分比（0–100）；優先用影片級 finalConfidence。
     var confidencePercent: Double {
+        if let finalConfidence {
+            return max(0, min(100, finalConfidence * 100))
+        }
         guard let label else { return 0 }
         let p = label == "good" ? probabilityGood : (1 - probabilityGood)
         return max(0, min(100, p * 100))
     }
 
     var qualityTitle: String {
-        guard let label else { return "無法辨識" }
-        return label == "good" ? "好" : "壞"
+        let resolved = finalLabel ?? label
+        guard let resolved else { return "無法辨識" }
+        return resolved == "good" ? "好" : "壞"
     }
 }
 
@@ -113,6 +141,10 @@ final class PoseStreamClient {
         let label: String
         let probability_good: Double
         let probability_bad: Double
+        let final_label: String?
+        let final_confidence: Double?
+        let dominance_ratio: Double?
+        let valid_samples_count: Int?
     }
 
     private struct APIErrorBody: Decodable {
@@ -228,7 +260,24 @@ final class PoseStreamClient {
                 let detail = (try? JSONDecoder().decode(APIErrorBody.self, from: data))?.detail
                 return LivePrediction(label: nil, probabilityGood: 0, note: detail ?? "辨識失敗")
             }
-            return LivePrediction(label: resp.label, probabilityGood: resp.probability_good, note: nil)
+            let finalLabel = resp.final_label ?? resp.label
+            let finalConf = resp.final_confidence
+            // 若後端已聚合，用 final_confidence 回填 probability_good 刻度，讓舊 HUD 也穩定。
+            let pGood: Double
+            if let finalConf {
+                pGood = finalLabel == "good" ? finalConf : (1 - finalConf)
+            } else {
+                pGood = resp.probability_good
+            }
+            return LivePrediction(
+                label: finalLabel,
+                probabilityGood: pGood,
+                note: nil,
+                finalLabel: finalLabel,
+                finalConfidence: finalConf,
+                dominanceRatio: resp.dominance_ratio,
+                validSamplesCount: resp.valid_samples_count
+            )
         } catch {
             return LivePrediction(label: nil, probabilityGood: 0, note: "無法連線伺服器")
         }

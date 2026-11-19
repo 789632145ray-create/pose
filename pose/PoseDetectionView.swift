@@ -447,6 +447,8 @@ struct PoseDetectionView: View {
 
     /// 每幀即時串流上傳 + 即時預測。
     private let stream = PoseStreamClient()
+    /// 累積多次即時 /predict，收斂成單一 final_label + final_confidence。
+    private let predictionBuffer = LivePredictionBuffer()
     @State private var livePrediction: LivePrediction?
     @State private var streamLoopTask: Task<Void, Never>?
     /// 影片整段模型辨識結果（按「品質辨識」後由 /predict 回傳）。
@@ -1294,6 +1296,7 @@ struct PoseDetectionView: View {
     @MainActor
     private func startStreaming() {
         livePrediction = nil
+        predictionBuffer.reset()
         guard assessmentEngine.usesQualityPredict else { return }
         let source = currentSourceLabel
         let uploadLiveFrames = assessmentEngine.usesTrainedModelPredict
@@ -1321,9 +1324,15 @@ struct PoseDetectionView: View {
                 if tick % 2 == 0 { // 約每秒預測一次
                     if let pred = await stream.predictIfReady() {
                         await MainActor.run {
-                            livePrediction = pred
-                            if case .video = detectionSource, pred.note == nil {
-                                videoQualityResult = pred
+                            // 單窗預測先寫入緩衝，再以加權投票收斂，避免結果跳動。
+                            if let aggregated = predictionBuffer.append(pred) {
+                                let stable = aggregated.asLivePrediction()
+                                livePrediction = stable
+                                if case .video = detectionSource {
+                                    videoQualityResult = stable
+                                }
+                            } else {
+                                livePrediction = pred
                             }
                         }
                     }
@@ -1343,6 +1352,7 @@ struct PoseDetectionView: View {
         let bpm = analysisPipeline.avgCadenceBPM
         Task { await stream.end(totalSteps: total, leftSteps: left, rightSteps: right, avgCadenceBPM: bpm) }
         livePrediction = nil
+        predictionBuffer.reset()
     }
 
     @MainActor
