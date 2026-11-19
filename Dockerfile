@@ -15,9 +15,10 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
 COPY backend/main.py backend/train.py backend/mongo_util.py \
-    backend/pose_quality_model.joblib \
+    backend/video_result_aggregator.py \
     ./
-# mediapipe_quality_model.joblib 改以原生 MediaPipe 資料重新訓練後再放入映像；缺檔時 /mediapipe/predict 回 503。
+COPY backend/*.joblib ./
+# 若尚無 mediapipe_quality_model.joblib，/mediapipe/predict 會回 503；訓練後 commit 該檔即可。
 
 ENV POSE_RELOAD=0
 
