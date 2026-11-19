@@ -679,34 +679,106 @@ def get_model(engine: str = "pose") -> dict:
 class PredictIn(BaseModel):
     frames: List[PoseFrame]
     engine: Optional[str] = None
+    # 影片級聚合：低信心門檻（預設 0.5）
+    min_conf: Optional[float] = 0.5
+    # 代表性信心：topk（預設）或 peak
+    score_mode: Optional[str] = "topk"
+    # 時間窗長度（影格數）；整段過短則只做單次預測再聚合
+    window_size: Optional[int] = 30
+    # 時間窗步長
+    window_stride: Optional[int] = 15
 
 
 class PredictResponse(BaseModel):
     label: str
     probability_good: float
     probability_bad: float
+    # App 直接渲染用（與 label / probability_* 對齊，多餘欄位舊版可忽略）。
+    final_label: Optional[str] = None
+    final_confidence: Optional[float] = None
+    dominance_ratio: Optional[float] = None
+    valid_samples_count: Optional[int] = None
 
 
-def _predict_with_engine(payload: PredictIn, engine: str) -> PredictResponse:
+def _frame_windows(frames: list, window_size: int, stride: int) -> list[list]:
+    """把影格切成重疊時間窗；影格不足一窗時回傳整段。"""
+    n = len(frames)
+    if n == 0:
+        return []
+    w = max(1, int(window_size))
+    s = max(1, int(stride))
+    if n <= w:
+        return [frames]
+    windows = [frames[i : i + w] for i in range(0, n - w + 1, s)]
+    # 確保尾端有覆蓋。
+    if windows[-1][-1] is not frames[-1]:
+        windows.append(frames[-w:])
+    return windows
+
+
+def _predict_windows(model, frame_dicts: list[dict], window_size: int, stride: int) -> list:
     import numpy as np
 
     from train import session_features
+    from video_result_aggregator import FramePrediction
+
+    windows = _frame_windows(frame_dicts, window_size, stride)
+    classes = list(model.classes_)
+    rows: list[FramePrediction] = []
+    for window in windows:
+        feats = session_features({"frames": window})
+        if feats is None:
+            continue
+        proba = model.predict_proba(np.array([feats], dtype=float))[0]
+        p_good = float(proba[classes.index(1)]) if 1 in classes else 0.0
+        p_bad = float(proba[classes.index(0)]) if 0 in classes else 0.0
+        if p_good >= p_bad:
+            rows.append(FramePrediction(label="good", confidence=p_good))
+        else:
+            rows.append(FramePrediction(label="bad", confidence=p_bad))
+    return rows
+
+
+def _predict_with_engine(payload: PredictIn, engine: str) -> PredictResponse:
+    from video_result_aggregator import ScoreMode, VideoResultAggregator
 
     bundle = get_model(engine)
     model = bundle["model"]
 
-    feats = session_features({"frames": [f.model_dump() for f in payload.frames]})
-    if feats is None:
+    frame_dicts = [f.model_dump() for f in payload.frames]
+    if not frame_dicts:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="frames 為空，無法預測")
 
-    proba = model.predict_proba(np.array([feats], dtype=float))[0]
-    classes = list(model.classes_)
-    p_good = float(proba[classes.index(1)]) if 1 in classes else 0.0
-    p_bad = float(proba[classes.index(0)]) if 0 in classes else 0.0
+    window_size = int(payload.window_size or 30)
+    stride = int(payload.window_stride or 15)
+    min_conf = 0.5 if payload.min_conf is None else float(payload.min_conf)
+    mode_raw = (payload.score_mode or "topk").strip().lower()
+    try:
+        score_mode = ScoreMode(mode_raw if mode_raw in {"topk", "peak"} else "topk")
+    except ValueError:
+        score_mode = ScoreMode.TOP_K
+
+    samples = _predict_windows(model, frame_dicts, window_size, stride)
+    if not samples:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="frames 為空，無法預測")
+
+    aggregated = VideoResultAggregator(min_conf=min_conf, score_mode=score_mode).aggregate(samples)
+    final_label = aggregated.final_label
+    final_conf = aggregated.final_confidence
+    # 相容舊欄位：probability_good 對應「好」的機率刻度；App 用 label+confidencePercent。
+    if final_label == "good":
+        p_good, p_bad = final_conf, 1.0 - final_conf
+    else:
+        p_bad, p_good = final_conf, 1.0 - final_conf
+
     return PredictResponse(
-        label="good" if p_good >= p_bad else "bad",
+        label=final_label,
         probability_good=p_good,
         probability_bad=p_bad,
+        final_label=final_label,
+        final_confidence=final_conf,
+        dominance_ratio=aggregated.dominance_ratio,
+        valid_samples_count=aggregated.valid_samples_count,
     )
 
 
