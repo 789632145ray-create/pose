@@ -1939,7 +1939,8 @@ struct PoseDetectionView: View {
                 nodes: mediaPipeEngine.previewNodes,
                 flipHorizontally: skeletonFlipsHorizontally,
                 contentSize: mediaPipeEngine.frameContentSize,
-                videoGravity: .resizeAspectFill
+                videoGravity: .resizeAspectFill,
+                displayRect: mediaPipeEngine.previewDisplayRect
             )
             .frame(width: w, height: h)
             .allowsHitTesting(false)
@@ -1953,10 +1954,14 @@ struct PoseDetectionView: View {
             MediaPipeCameraPreview(engine: mediaPipeEngine)
                 .frame(width: w, height: h)
                 .clipped()
+                .onAppear { mediaPipeEngine.previewDisplayRect = .zero }
         case .video:
-            MediaPipeVideoPreview(player: mediaPipeEngine.videoPlayer)
-                .frame(width: w, height: h)
-                .clipped()
+            MediaPipeVideoPreview(
+                player: mediaPipeEngine.videoPlayer,
+                videoRect: $mediaPipeEngine.previewDisplayRect
+            )
+            .frame(width: w, height: h)
+            .clipped()
         }
     }
 

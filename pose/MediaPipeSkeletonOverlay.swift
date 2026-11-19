@@ -78,6 +78,8 @@ struct MediaPipeSkeletonOverlay: View {
     var contentSize: CGSize = .zero
     /// 必須與預覽層 videoGravity 一致。
     var videoGravity: AVLayerVideoGravity = .resizeAspectFill
+    /// 若來自 AVPlayerLayer.videoRect（非空），優先用它對位，最準。
+    var displayRect: CGRect = .zero
 
     var body: some View {
         Canvas { context, size in
@@ -110,8 +112,13 @@ struct MediaPipeSkeletonOverlay: View {
     private func point(_ node: PoseNode, in viewSize: CGSize) -> CGPoint {
         let nx = flipHorizontally ? 1 - node.x : node.x
         let ny = node.y
-        let content = (contentSize.width > 1 && contentSize.height > 1) ? contentSize : viewSize
-        let fitted = Self.fittedRect(content: content, in: viewSize, gravity: videoGravity)
+        let fitted: CGRect
+        if displayRect.width > 1, displayRect.height > 1 {
+            fitted = displayRect
+        } else {
+            let content = (contentSize.width > 1 && contentSize.height > 1) ? contentSize : viewSize
+            fitted = Self.fittedRect(content: content, in: viewSize, gravity: videoGravity)
+        }
         return CGPoint(
             x: fitted.minX + nx * fitted.width,
             y: fitted.minY + ny * fitted.height

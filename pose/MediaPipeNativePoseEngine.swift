@@ -8,6 +8,7 @@
 
 import AVFoundation
 import Combine
+import CoreImage
 import Foundation
 import QuartzCore
 import SwiftUI
@@ -32,6 +33,8 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
     @Published var videoPlayer: AVPlayer?
     /// MediaPipe 推理影格的直立尺寸；骨架 overlay 依此做 aspectFill 對位。
     @Published var frameContentSize: CGSize = .zero
+    /// AVPlayerLayer.videoRect（或相機 preview bounds）；優先用於骨架對位。
+    @Published var previewDisplayRect: CGRect = .zero
 
     var detectionActive = false
     var activityMode: GaitActivityMode = .walking
@@ -72,6 +75,7 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
     /// 影片軌 preferredTransform 對應的影像方向（與 AVPlayerLayer 顯示一致）。
     private var videoFrameOrientation: UIImage.Orientation = .up
     private var videoUprightSize: CGSize = .zero
+    private let ciContext = CIContext(options: [.cacheIntermediates: false])
 
 #if canImport(MediaPipeTasksVision)
     /// 相機 liveStream；僅在 capture queue 存取。
@@ -215,17 +219,6 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
         guard ensureVideoLandmarker() else { return }
 
         let asset = AVURLAsset(url: url)
-        if let track = asset.tracks(withMediaType: .video).first {
-            let transform = track.preferredTransform
-            let natural = track.naturalSize
-            videoFrameOrientation = Self.imageOrientation(from: transform)
-            videoUprightSize = Self.uprightSize(natural: natural, orientation: videoFrameOrientation)
-            frameContentSize = videoUprightSize
-        } else {
-            videoFrameOrientation = .up
-            videoUprightSize = .zero
-        }
-
         let item = AVPlayerItem(asset: asset)
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
@@ -251,11 +244,31 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
                 self?.handleVideoEnded()
             }
         }
+
+        // iOS 16+ tracks 需非同步載入；沒載到會誤判方向 → 骨架整片跑掉。
+        Task { await self.loadVideoTrackMetadata(from: asset) }
 #else
         lastError = "尚未連結 MediaPipeTasksVision，無法以原生 MediaPipe 分析影片。"
         statusHint = lastError ?? ""
         adviceLines = [statusHint]
 #endif
+    }
+
+    @MainActor
+    private func loadVideoTrackMetadata(from asset: AVAsset) async {
+        do {
+            let tracks = try await asset.loadTracks(withMediaType: .video)
+            guard let track = tracks.first else { return }
+            let natural = try await track.load(.naturalSize)
+            let transform = try await track.load(.preferredTransform)
+            videoFrameOrientation = Self.imageOrientation(from: transform)
+            videoUprightSize = Self.uprightSize(natural: natural, orientation: videoFrameOrientation)
+            if videoUprightSize.width > 0 {
+                frameContentSize = videoUprightSize
+            }
+        } catch {
+            statusHint = "無法讀取影片方向：\(error.localizedDescription)"
+        }
     }
 
     /// 開始／停止影片寫入：播放並抽幀送入 Landmarker。
@@ -302,6 +315,7 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
         videoUprightSize = .zero
         if runtimeKind == .video {
             frameContentSize = .zero
+            previewDisplayRect = .zero
         }
 #if canImport(MediaPipeTasksVision)
         videoLandmarker = nil
@@ -360,21 +374,25 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
         guard ts > lastVideoTimestampMs else { return }
         lastVideoTimestampMs = ts
 
-        if videoUprightSize == .zero {
-            let raw = CGSize(
-                width: CGFloat(CVPixelBufferGetWidth(pixelBuffer)),
-                height: CGFloat(CVPixelBufferGetHeight(pixelBuffer))
-            )
-            videoUprightSize = Self.uprightSize(natural: raw, orientation: videoFrameOrientation)
-        }
-        if frameContentSize != videoUprightSize, videoUprightSize.width > 0 {
-            frameContentSize = videoUprightSize
+        let bufSize = CGSize(
+            width: CGFloat(CVPixelBufferGetWidth(pixelBuffer)),
+            height: CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+        )
+        // VideoOutput 有時已是直立 buffer；若再套 preferredTransform 會「轉兩次」導致骨架爆炸。
+        let prepared = Self.prepareBufferForDetection(
+            pixelBuffer,
+            bufferSize: bufSize,
+            trackOrientation: videoFrameOrientation,
+            trackUprightSize: videoUprightSize,
+            ciContext: ciContext
+        )
+        if frameContentSize != prepared.contentSize, prepared.contentSize.width > 0 {
+            frameContentSize = prepared.contentSize
         }
 
 #if canImport(MediaPipeTasksVision)
         guard let landmarker = videoLandmarker else { return }
-        // 必須帶上與 AVPlayerLayer 相同的方向，否則骨架會壓扁／偏移。
-        guard let image = try? MPImage(pixelBuffer: pixelBuffer, orientation: videoFrameOrientation) else {
+        guard let image = try? MPImage(pixelBuffer: prepared.buffer, orientation: .up) else {
             return
         }
         do {
@@ -384,6 +402,70 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
             statusHint = "MediaPipe 影片：\(error.localizedDescription)"
         }
 #endif
+    }
+
+    /// 產出「已直立」的 pixel buffer，推理一律 orientation=.up，與 AVPlayer 畫面一致。
+    nonisolated private static func prepareBufferForDetection(
+        _ buffer: CVPixelBuffer,
+        bufferSize: CGSize,
+        trackOrientation: UIImage.Orientation,
+        trackUprightSize: CGSize,
+        ciContext: CIContext
+    ) -> (buffer: CVPixelBuffer, contentSize: CGSize) {
+        let bufferPortrait = bufferSize.height >= bufferSize.width
+        let targetPortrait: Bool = {
+            if trackUprightSize.width > 1, trackUprightSize.height > 1 {
+                return trackUprightSize.height >= trackUprightSize.width
+            }
+            return bufferPortrait
+        }()
+
+        // Buffer 已與顯示直立方向一致：直接用，避免雙重旋轉。
+        if bufferPortrait == targetPortrait || trackOrientation == .up {
+            return (buffer, bufferSize)
+        }
+
+        guard let rotated = rotatePixelBuffer(buffer, orientation: trackOrientation, ciContext: ciContext) else {
+            return (buffer, bufferSize)
+        }
+        let size = CGSize(
+            width: CGFloat(CVPixelBufferGetWidth(rotated)),
+            height: CGFloat(CVPixelBufferGetHeight(rotated))
+        )
+        return (rotated, size)
+    }
+
+    nonisolated private static func rotatePixelBuffer(
+        _ buffer: CVPixelBuffer,
+        orientation: UIImage.Orientation,
+        ciContext: CIContext
+    ) -> CVPixelBuffer? {
+        let cgOrientation: CGImagePropertyOrientation
+        switch orientation {
+        case .down: cgOrientation = .down
+        case .left: cgOrientation = .left
+        case .right: cgOrientation = .right
+        default: return buffer
+        }
+        let oriented = CIImage(cvPixelBuffer: buffer).oriented(cgOrientation)
+        let extent = oriented.extent.integral
+        var output: CVPixelBuffer?
+        let attrs: [String: Any] = [
+            kCVPixelBufferCGImageCompatibilityKey as String: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey as String: true,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+        ]
+        CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            Int(extent.width),
+            Int(extent.height),
+            kCVPixelFormatType_32BGRA,
+            attrs as CFDictionary,
+            &output
+        )
+        guard let output else { return nil }
+        ciContext.render(oriented, to: output)
+        return output
     }
 
     /// AVAssetTrack.preferredTransform → UIImage.Orientation（對齊播放器顯示）。

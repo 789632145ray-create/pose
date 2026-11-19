@@ -3,6 +3,7 @@
 //  pose
 //
 //  原生 AVCapture 預覽層，供 MediaPipe Pose Landmarker 使用（不經 QuickPoseCameraView）。
+//  相機連線已設 portrait；骨架對位靠 frameContentSize + aspectFill，不需 videoRect。
 //
 
 import AVFoundation
