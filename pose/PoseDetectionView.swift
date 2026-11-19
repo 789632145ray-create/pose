@@ -188,36 +188,41 @@ final class QuickPoseEngine: ObservableObject {
                 return
             }
             if let landmarks, let pipeline = analysisPipeline {
-                let posture = PoseAdvice.evaluate(from: landmarks)
-                let gait = PoseGaitAdvisor.gaitAdvice(
-                    from: landmarks,
-                    profile: bodyGaitProfile,
-                    activity: activityMode
-                )
-                var mergedIssues = posture.issues
-                mergedIssues.formUnion(gait.issues)
-                var mergedLines = posture.lines
-                if !gait.lines.isEmpty {
-                    mergedLines.append(contentsOf: gait.lines)
-                }
                 // 寫入／串流使用定稿幀（手臂等低信心關節已插值或丟棄）。
                 let minKeep = (usesBackViewPipeline || usesSideViewPipeline) ? 0.25 : 0.5
                 let nodes = stabilized ?? (rawNodes ?? []).filter { $0.confidenceScore >= minKeep }
-                var finalLines = mergedLines
-                var finalIssues = mergedIssues
-                // 背面／側面特徵只在對應拍攝視角啟用。
+                var finalLines: [String] = []
+                var finalIssues = Set<PoseIssueCode>()
+
                 if usesBackViewPipeline {
+                    // 背面無法可靠量測前後向；只用左右對齊 + 背面特徵，略過走路／跑步前後建議。
+                    let posture = PoseAdvice.evaluate(from: landmarks)
+                    finalLines.append(contentsOf: posture.lines)
+                    finalIssues.formUnion(posture.issues)
                     let backFeatures = backViewPipeline.process(nodes: nodes)
                     if backFeatures.coreReliable || !backFeatures.adviceLines.isEmpty {
                         finalLines.append(contentsOf: backFeatures.adviceLines)
                     }
                     finalIssues.formUnion(backFeatures.debouncedIssues)
-                } else if usesSideViewPipeline {
-                    let sideFeatures = sideViewPreprocessor.process(nodes: nodes)
-                    if sideFeatures.coreReliable || !sideFeatures.adviceLines.isEmpty {
-                        finalLines.append(contentsOf: sideFeatures.adviceLines)
+                    finalIssues.subtract(PoseIssueCode.sagittalPlaneCodes)
+                } else {
+                    let posture = PoseAdvice.evaluate(from: landmarks)
+                    let gait = PoseGaitAdvisor.gaitAdvice(
+                        from: landmarks,
+                        profile: bodyGaitProfile,
+                        activity: activityMode
+                    )
+                    finalLines.append(contentsOf: posture.lines)
+                    finalLines.append(contentsOf: gait.lines)
+                    finalIssues.formUnion(posture.issues)
+                    finalIssues.formUnion(gait.issues)
+                    if usesSideViewPipeline {
+                        let sideFeatures = sideViewPreprocessor.process(nodes: nodes)
+                        if sideFeatures.coreReliable || !sideFeatures.adviceLines.isEmpty {
+                            finalLines.append(contentsOf: sideFeatures.adviceLines)
+                        }
+                        finalIssues.formUnion(sideFeatures.debouncedIssues)
                     }
-                    finalIssues.formUnion(sideFeatures.debouncedIssues)
                 }
                 let advice = PoseFrameAdvice(lines: finalLines, issues: finalIssues)
                 let store: PoseDatabase = prefersMediaPipeStore ? .mediaPipe : .shared
@@ -427,6 +432,8 @@ struct PoseDetectionView: View {
     @State private var showPhotosPicker = false
     @State private var showFileImporter = false
     @State private var isLoadingVideo = false
+    /// 確認影片後到第一幀畫面出現前的等待（避免黑屏像當機）。
+    @State private var isAwaitingVideoFirstFrame = false
     @State private var showSummary = false
     @State private var summaryLines: [String] = []
     @State private var videoLoadError: String?
@@ -620,6 +627,15 @@ struct PoseDetectionView: View {
                     liveAnalyzingBanner(remaining: sec)
                 }
             }
+            .overlay {
+                if isLoadingVideo || isAwaitingVideoFirstFrame {
+                    videoWaitingOverlay(
+                        message: isLoadingVideo
+                            ? "正在讀取影片，請稍候…"
+                            : "正在準備影片畫面…"
+                    )
+                }
+            }
     }
 
     private var contentWithLifecycle: some View {
@@ -649,6 +665,24 @@ struct PoseDetectionView: View {
             }
             .onChange(of: auth.userProfile) { _, _ in
                 syncBodyGaitProfile()
+            }
+            .onChange(of: quickPoseEngine.overlayImage) { _, newImage in
+                if isAwaitingVideoFirstFrame, newImage != nil {
+                    isAwaitingVideoFirstFrame = false
+                }
+            }
+            .onChange(of: quickPoseEngine.frameCallbackCount) { _, count in
+                if isAwaitingVideoFirstFrame, count > 0, quickPoseEngine.overlayImage != nil {
+                    isAwaitingVideoFirstFrame = false
+                }
+            }
+            .task(id: isAwaitingVideoFirstFrame) {
+                guard isAwaitingVideoFirstFrame else { return }
+                // 最長等待 20 秒，避免永遠蓋住畫面。
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                if isAwaitingVideoFirstFrame {
+                    isAwaitingVideoFirstFrame = false
+                }
             }
             .task(id: cameraGate) {
                 guard cameraGate == .authorized, case .liveCamera = detectionSource else { return }
@@ -1091,6 +1125,8 @@ struct PoseDetectionView: View {
     @MainActor
     private func syncCaptureViewMode() {
         quickPoseEngine.syncConfidenceFilterForCaptureView(modeStore.captureView)
+        // 背面模式不產生前後向（前傾／跨步／著地）亂分析建議。
+        analysisPipeline.suppressSagittalFormAdvice = modeStore.isBackView
     }
 
     @MainActor
@@ -1144,6 +1180,9 @@ struct PoseDetectionView: View {
     private func handlePickedItem(_ item: PhotosPickerItem?) async {
         guard let item else { return }
         isLoadingVideo = true
+        // 先讓「等待中」overlay 畫出來，再開始讀檔，避免畫面像當掉。
+        await Task.yield()
+        try? await Task.sleep(nanoseconds: 80_000_000)
         defer {
             isLoadingVideo = false
             pickedItem = nil
@@ -1155,8 +1194,12 @@ struct PoseDetectionView: View {
             }
             if let data = try await item.loadTransferable(type: Data.self) {
                 let name = item.itemIdentifier ?? "video.mov"
-                let dst = URL.temporaryDirectory.appendingPathComponent(UUID().uuidString + "-" + URL(fileURLWithPath: name).lastPathComponent)
-                try data.write(to: dst)
+                let dst = URL.temporaryDirectory.appendingPathComponent(
+                    UUID().uuidString + "-" + URL(fileURLWithPath: name).lastPathComponent
+                )
+                try await Task.detached(priority: .userInitiated) {
+                    try data.write(to: dst)
+                }.value
                 presentPendingMovie(url: dst, displayName: dst.lastPathComponent)
                 return
             }
@@ -1173,17 +1216,25 @@ struct PoseDetectionView: View {
             videoLoadError = "無法開啟檔案：\(error.localizedDescription)"
         case .success(let urls):
             guard let url = urls.first else { return }
-            let accessed = url.startAccessingSecurityScopedResource()
-            defer {
-                if accessed { url.stopAccessingSecurityScopedResource() }
-            }
-            do {
-                let dst = URL.temporaryDirectory.appendingPathComponent(UUID().uuidString + "-" + url.lastPathComponent)
-                try? FileManager.default.removeItem(at: dst)
-                try FileManager.default.copyItem(at: url, to: dst)
-                presentPendingMovie(url: dst, displayName: url.lastPathComponent)
-            } catch {
-                videoLoadError = "影片複製失敗：\(error.localizedDescription)"
+            isLoadingVideo = true
+            Task { @MainActor in
+                defer { isLoadingVideo = false }
+                let accessed = url.startAccessingSecurityScopedResource()
+                defer {
+                    if accessed { url.stopAccessingSecurityScopedResource() }
+                }
+                do {
+                    let dst = URL.temporaryDirectory.appendingPathComponent(
+                        UUID().uuidString + "-" + url.lastPathComponent
+                    )
+                    try await Task.detached(priority: .userInitiated) {
+                        try? FileManager.default.removeItem(at: dst)
+                        try FileManager.default.copyItem(at: url, to: dst)
+                    }.value
+                    presentPendingMovie(url: dst, displayName: url.lastPathComponent)
+                } catch {
+                    videoLoadError = "影片複製失敗：\(error.localizedDescription)"
+                }
             }
         }
     }
@@ -1261,6 +1312,7 @@ struct PoseDetectionView: View {
         stopDetectionActivity(fullReset: true)
         quickPoseEngine.fpsText = "FPS: —"
         quickPoseEngine.adviceLines = ["正在載入影片…"]
+        isAwaitingVideoFirstFrame = true
         detectionSource = .video(pending.url)
         isPaused = true
         beginVideoDetectionCountdown()
@@ -1472,6 +1524,8 @@ struct PoseDetectionView: View {
     private func switchBackToCamera() {
         stopDetectionActivity(fullReset: true)
         isPaused = true
+        isAwaitingVideoFirstFrame = false
+        isLoadingVideo = false
         quickPoseEngine.fpsText = "FPS: —（已暫停）"
         cancelLiveSessionTimer()
         sessionAudio.stopAll()
@@ -2314,6 +2368,39 @@ struct PoseDetectionView: View {
             }
         }
         .allowsHitTesting(true)
+    }
+
+    /// 讀取／準備影片時的全螢幕等待，避免黑屏無回饋像當機。
+    @MainActor
+    private func videoWaitingOverlay(message: String) -> some View {
+        ZStack {
+            Color.black.opacity(0.72).ignoresSafeArea()
+            VStack(spacing: 20) {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(.white)
+                    .scaleEffect(1.4)
+                Text("請稍候")
+                    .font(.title2.weight(.bold))
+                    .foregroundStyle(.white)
+                Text(message)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 28)
+                Text("背景正在處理影片，畫面稍後會開始播放")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.6))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 28)
+            }
+            .padding(28)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
+            .padding(32)
+        }
+        .allowsHitTesting(true)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(message)
     }
 
     /// 準備階段：遠距離可視的特大倒數（固定 LiveTimedSessionConfig.prepareSeconds，不是舊的 5 秒）。
