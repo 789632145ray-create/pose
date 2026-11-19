@@ -1360,16 +1360,10 @@ struct PoseDetectionView: View {
             if preferUpload {
                 let ok = await stream.begin(mode: .predict, sourceLabel: source)
                 if !ok {
-                    // 憑證／伺服器仍可能可打 /predict（影片模式就是這條路）。
+                    // /sessions 開不起時安靜退回本機視窗 /predict（與影片模式相同），
+                    // 不要把暫時狀態寫進 HUD，否則會一直顯示成「品質異常」。
                     stream.preparePredictWindow()
                     uploadLiveFrames = false
-                    await MainActor.run {
-                        livePrediction = LivePrediction(
-                            label: nil,
-                            probabilityGood: 0,
-                            note: "雲端 session 未開，改用本機預測"
-                        )
-                    }
                 }
             } else {
                 stream.preparePredictWindow()
