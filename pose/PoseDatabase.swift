@@ -16,6 +16,41 @@ import Foundation
 import QuickPoseCore
 import RealmSwift
 
+// MARK: - 訓練匯出（Codable，避免 JSONSerialization + Realm 崩潰）
+
+private struct TrainingExportFile: Encodable {
+    let engine: String
+    let count: Int
+    let sessions: [TrainingExportSession]
+}
+
+private struct TrainingExportSession: Encodable {
+    let _id: String
+    let label: String
+    let source_label: String
+    let engine: String
+    let total_steps: Int
+    let left_steps: Int
+    let right_steps: Int
+    let avg_cadence_bpm: Double?
+    let frames: [TrainingExportFrame]
+}
+
+private struct TrainingExportFrame: Encodable {
+    let frame_index: Int
+    let timestamp: Double
+    let nodes: [TrainingExportNode]
+}
+
+private struct TrainingExportNode: Encodable {
+    let joint: String
+    let x: Double
+    let y: Double
+    let z: Double
+    let visibility: Double
+    let presence: Double
+}
+
 // MARK: - 純值節點
 
 /// 單一身體節點（已從 QuickPose.Point3d 取出，可跨執行緒安全傳遞）。
@@ -330,61 +365,57 @@ final class PoseDatabase {
     }
 
     /// 匯出已標 good/bad 的 session（含節點），給 Mac `train.py --from-json` 使用。
+    /// 使用 Codable／JSONEncoder，避免 JSONSerialization 碰上 Realm List／Swift 值而崩潰
+    ///（`Invalid type in JSON write (__SwiftValue)`）。
     func exportLabeledTrainingJSON() throws -> URL {
         let engine = kind == .mediaPipe ? "mediapipe" : "pose"
-        let built: (payload: [String: Any]?, error: String?) = queue.sync {
+        let built: (payload: TrainingExportFile?, error: String?) = queue.sync {
             guard let realm = try? openRealm() else {
                 return (nil, "無法開啟本機資料庫")
             }
-            let labeled = realm.objects(RLMPoseSession.self).filter { session in
+            let labeled = Array(realm.objects(RLMPoseSession.self)).filter { session in
                 session.trainingLabel == "good" || session.trainingLabel == "bad"
             }
             guard !labeled.isEmpty else {
                 return (nil, "還沒有本機標好／壞的資料。請先在詳情頁標記。")
             }
-            let sessionsPayload: [[String: Any]] = labeled.map { session in
-                let frames: [[String: Any]] = session.frames
-                    .sorted(by: { $0.frameIndex < $1.frameIndex })
-                    .map { frame in
-                        [
-                            "frame_index": frame.frameIndex,
-                            "timestamp": frame.timestamp,
-                            "nodes": frame.nodes.map { node in
-                                [
-                                    "joint": node.joint,
-                                    "x": node.x,
-                                    "y": node.y,
-                                    "z": node.z,
-                                    "visibility": node.visibility,
-                                    "presence": node.presence,
-                                ]
-                            },
-                        ]
-                    }
+            let sessions = labeled.map { session -> TrainingExportSession in
                 let source = session.sourceLabel
-                var doc: [String: Any] = [
-                    "_id": session.id,
-                    "label": session.trainingLabel ?? "",
-                    "source_label": kind == .mediaPipe && !source.hasPrefix("mediapipe")
-                        ? "mediapipe｜\(source)"
-                        : source,
-                    "engine": engine,
-                    "total_steps": session.totalSteps,
-                    "left_steps": session.leftSteps,
-                    "right_steps": session.rightSteps,
-                    "frames": frames,
-                ]
-                if let bpm = session.avgCadenceBPM {
-                    doc["avg_cadence_bpm"] = bpm
-                }
-                return doc
+                let sourceLabel = kind == .mediaPipe && !source.hasPrefix("mediapipe")
+                    ? "mediapipe｜\(source)"
+                    : source
+                let frames = Array(session.frames)
+                    .sorted(by: { $0.frameIndex < $1.frameIndex })
+                    .map { frame -> TrainingExportFrame in
+                        TrainingExportFrame(
+                            frame_index: frame.frameIndex,
+                            timestamp: frame.timestamp,
+                            nodes: Array(frame.nodes).map { node in
+                                TrainingExportNode(
+                                    joint: node.joint,
+                                    x: node.x,
+                                    y: node.y,
+                                    z: node.z,
+                                    visibility: node.visibility,
+                                    presence: node.presence
+                                )
+                            }
+                        )
+                    }
+                return TrainingExportSession(
+                    _id: session.id,
+                    label: session.trainingLabel ?? "",
+                    source_label: sourceLabel,
+                    engine: engine,
+                    total_steps: session.totalSteps,
+                    left_steps: session.leftSteps,
+                    right_steps: session.rightSteps,
+                    avg_cadence_bpm: session.avgCadenceBPM,
+                    frames: frames
+                )
             }
             return (
-                [
-                    "engine": engine,
-                    "count": sessionsPayload.count,
-                    "sessions": sessionsPayload,
-                ],
+                TrainingExportFile(engine: engine, count: sessions.count, sessions: sessions),
                 nil
             )
         }
@@ -394,7 +425,9 @@ final class PoseDatabase {
         guard let payload = built.payload else {
             throw NSError(domain: "PoseDatabase", code: 1, userInfo: [NSLocalizedDescriptionKey: "匯出失敗"])
         }
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted])
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(payload)
         let name = kind == .mediaPipe ? "mediapipe_training_export.json" : "pose_training_export.json"
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
         try data.write(to: url, options: .atomic)

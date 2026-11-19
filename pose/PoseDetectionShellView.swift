@@ -8,28 +8,6 @@
 import Combine
 import SwiftUI
 
-/// 骨架模型，和上面的偵測引擎分開。QuickPose 較輕、影格較密；MediaPipe 是 BlazePose Full。
-enum PoseSkeletonModel: String, CaseIterable, Identifiable {
-    case quickPose = "quickpose"
-    case mediaPipe = "mediapipe"
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .quickPose: return "QuickPose 模型"
-        case .mediaPipe: return "MediaPipe 模型"
-        }
-    }
-
-    var shortTitle: String {
-        switch self {
-        case .quickPose: return "QuickPose"
-        case .mediaPipe: return "MediaPipe"
-        }
-    }
-}
-
 /// 拍攝視角：背面／側面特徵管線各自只在對應模式啟用。
 enum PoseCaptureViewMode: String, CaseIterable, Identifiable {
     case front
@@ -58,8 +36,8 @@ enum PoseCaptureViewMode: String, CaseIterable, Identifiable {
 @MainActor
 final class DetectionModeStore: ObservableObject {
     @AppStorage("poseDetectionEngine") private var engineRaw = PoseAssessmentEngine.trainedModel.rawValue
+    @AppStorage("trainedQualityModel") private var trainedQualityRaw = TrainedQualityModel.quickPose.rawValue
     @AppStorage("poseGaitActivity") private var activityRaw = GaitActivityMode.walking.rawValue
-    @AppStorage("poseSkeletonModel") private var skeletonRaw = PoseSkeletonModel.mediaPipe.rawValue
     @AppStorage("poseCaptureViewMode") private var captureViewRaw = PoseCaptureViewMode.front.rawValue
 
     var engine: PoseAssessmentEngine {
@@ -71,18 +49,20 @@ final class DetectionModeStore: ObservableObject {
         }
     }
 
-    var activity: GaitActivityMode {
-        get { GaitActivityMode.resolved(fromStored: activityRaw) }
+    /// 僅在「自訓模型」引擎下生效：選 QuickPose 或 MediaPipe 哪一套 joblib 做辨識。
+    var trainedQualityModel: TrainedQualityModel {
+        get { TrainedQualityModel.resolved(fromStored: trainedQualityRaw) }
         set {
-            activityRaw = newValue.rawValue
+            trainedQualityRaw = newValue.rawValue
+            newValue.save()
             objectWillChange.send()
         }
     }
 
-    var skeletonModel: PoseSkeletonModel {
-        get { PoseSkeletonModel(rawValue: skeletonRaw) ?? .mediaPipe }
+    var activity: GaitActivityMode {
+        get { GaitActivityMode.resolved(fromStored: activityRaw) }
         set {
-            skeletonRaw = newValue.rawValue
+            activityRaw = newValue.rawValue
             objectWillChange.send()
         }
     }
@@ -97,6 +77,10 @@ final class DetectionModeStore: ObservableObject {
 
     var isBackView: Bool { captureView == .back }
     var isSideView: Bool { captureView == .side }
+
+    var usesNativeMediaPipeRuntime: Bool {
+        engine.usesNativeMediaPipe(qualityModel: trainedQualityModel)
+    }
 }
 
 struct PoseDetectionShellView: View {
@@ -104,12 +88,18 @@ struct PoseDetectionShellView: View {
     @StateObject private var modeStore = DetectionModeStore()
     @AppStorage("didShowEngineChooser") private var didShowEngineChooser = false
     @State private var showEngineChooser = false
+    @State private var showUserGuide = false
 
     var body: some View {
         Group {
             PoseDetectionView()
         }
         .environmentObject(modeStore)
+        .sheet(isPresented: $showUserGuide, onDismiss: handleUserGuideDismissed) {
+            UserGuideSheet {
+                showUserGuide = false
+            }
+        }
         .sheet(isPresented: $showEngineChooser) {
             EngineChooserSheet(modeStore: modeStore) {
                 didShowEngineChooser = true
@@ -117,7 +107,29 @@ struct PoseDetectionShellView: View {
             }
         }
         .onAppear {
-            if !didShowEngineChooser {
+            presentFirstRunSheetsIfNeeded()
+        }
+        .onChange(of: auth.username) { _, _ in
+            presentFirstRunSheetsIfNeeded()
+        }
+    }
+
+    /// 新註冊會員先看使用說明；看完（或無需顯示）再跳出引擎選擇。
+    private func presentFirstRunSheetsIfNeeded() {
+        guard !showUserGuide, !showEngineChooser else { return }
+        if auth.shouldPresentUserGuide {
+            showUserGuide = true
+            return
+        }
+        if !didShowEngineChooser {
+            showEngineChooser = true
+        }
+    }
+
+    private func handleUserGuideDismissed() {
+        auth.markUserGuideSeen()
+        if !didShowEngineChooser {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                 showEngineChooser = true
             }
         }
@@ -161,7 +173,7 @@ private struct EngineChooserSheet: View {
                 } header: {
                     Text("請選擇偵測引擎")
                 } footer: {
-                    Text("三種引擎都可相機／上傳影片，並把節點標好／壞上傳。自訓模型可再選 QuickPose／MediaPipe 骨架；MediaPipe 引擎寫入 mediapipe.realm，其餘寫入 pose.realm。")
+                    Text("QuickPose／自訓（QuickPose 模型）寫入 pose.realm；MediaPipe 引擎與自訓（MediaPipe 模型）以原生 Landmarker 寫入 mediapipe.realm。選「自訓模型」後可再選要用哪一套已訓練的品質模型辨識。")
                 }
             }
             .navigationTitle("偵測引擎")
@@ -209,6 +221,9 @@ struct DetectionEnginePickerRow: View {
                     .accessibilityAddTraits(selected ? .isSelected : [])
                 }
             }
+            if modeStore.engine == .trainedModel {
+                TrainedQualityModelPickerRow()
+            }
         }
     }
 
@@ -221,33 +236,40 @@ struct DetectionEnginePickerRow: View {
     }
 }
 
-struct SkeletonModelPickerRow: View {
+struct TrainedQualityModelPickerRow: View {
     @EnvironmentObject private var modeStore: DetectionModeStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("骨架模型")
+            Text("辨識模型")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.75))
             HStack(spacing: 6) {
-                ForEach(PoseSkeletonModel.allCases) { model in
-                    let selected = modeStore.skeletonModel == model
+                ForEach(TrainedQualityModel.allCases) { model in
+                    let selected = modeStore.trainedQualityModel == model
                     Button {
-                        modeStore.skeletonModel = model
+                        modeStore.trainedQualityModel = model
                     } label: {
-                        Text(model.title)
-                            .font(.caption.weight(.bold))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.75)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
+                        VStack(spacing: 4) {
+                            Image(systemName: model.systemImage)
+                                .font(.body.weight(.semibold))
+                            Text(model.shortTitle)
+                                .font(.caption.weight(.bold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
                     }
                     .buttonStyle(.bordered)
-                    .tint(selected ? (model == .mediaPipe ? .indigo : .cyan) : .gray)
+                    .tint(selected ? (model == .mediaPipe ? Color.mint : Color.indigo) : .gray)
                     .accessibilityLabel(model.title)
                     .accessibilityAddTraits(selected ? .isSelected : [])
                 }
             }
+            Text(modeStore.trainedQualityModel.detail)
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.65))
         }
     }
 }
@@ -348,6 +370,20 @@ struct DetectionEngineMenuItems: View {
                         Label(engine.title, systemImage: "checkmark")
                     } else {
                         Text(engine.title)
+                    }
+                }
+            }
+            if modeStore.engine == .trainedModel {
+                Divider()
+                ForEach(TrainedQualityModel.allCases) { model in
+                    Button {
+                        modeStore.trainedQualityModel = model
+                    } label: {
+                        if modeStore.trainedQualityModel == model {
+                            Label("辨識：\(model.shortTitle)", systemImage: "checkmark")
+                        } else {
+                            Text("辨識：\(model.shortTitle)")
+                        }
                     }
                 }
             }

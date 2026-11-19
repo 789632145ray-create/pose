@@ -275,6 +275,20 @@ enum PoseIssueCode: Hashable {
     case elbowAngleOff
     case armCrossMidline
 
+    /// 背面視角無法可靠量測的前後向（矢狀面）問題；背面模式應略過。
+    static let sagittalPlaneCodes: Set<PoseIssueCode> = [
+        .overStriding,
+        .footDrag,
+        .limitedHipExtension,
+        .forwardStoop,
+        .forefootStrike,
+        .incompleteToeOff,
+        .waistHingeLean,
+        .insufficientForwardLean,
+        .excessiveForwardLean,
+        .heelStrikeWhileRunning,
+    ]
+
     var summaryDescription: String {
         switch self {
         case .lowVisibility: return "關節可見度不足"
@@ -315,6 +329,8 @@ final class PoseAnalysisPipeline {
     var bodyProfile: BodyGaitProfile?
     /// 走路或跑步，決定用哪一套姿勢核心。
     var activityMode: GaitActivityMode = .walking
+    /// 背面拍攝：不累積／不摘要前後向（前傾、跨步、著地等）建議。
+    var suppressSagittalFormAdvice = false
 
     var totalSteps: Int { stepDetector.totalSteps }
     var leftSteps: Int { stepDetector.leftSteps }
@@ -337,13 +353,35 @@ final class PoseAnalysisPipeline {
 
     /// 對單一幀做：低通 → 骨盆歸一 → 左右腳踝獨立步偵測；同時累積問題次數。
     func process(landmarks: QuickPose.Landmarks, lines: [String], issues: Set<PoseIssueCode>) -> PoseStepFrameResult {
+        if !suppressSagittalFormAdvice {
+            gaitMetrics.ingest(landmarks: landmarks, profile: bodyProfile, activity: activityMode)
+        }
+        return process(keypointFrame: PoseKeypointExtractor.extract(landmarks), lines: lines, issues: issues)
+    }
+
+    /// MediaPipe 原生路徑：已轉成關鍵點幀，不再依賴 QuickPose.Landmarks。
+    func process(
+        keypointFrame: PoseKeypointFrame,
+        lines: [String],
+        issues: Set<PoseIssueCode>,
+        formSnapshot: WalkingFormSnapshot? = nil
+    ) -> PoseStepFrameResult {
         totalEvaluatedFrames += 1
-        for code in issues {
+        let countedIssues = suppressSagittalFormAdvice
+            ? issues.subtracting(PoseIssueCode.sagittalPlaneCodes)
+            : issues
+        for code in countedIssues {
             issueCounts[code, default: 0] += 1
         }
-        gaitMetrics.ingest(landmarks: landmarks, profile: bodyProfile, activity: activityMode)
-        let raw = PoseKeypointExtractor.extract(landmarks)
-        let smoothed = lowPass.pushAndAverage(raw)
+        if !suppressSagittalFormAdvice, let formSnapshot {
+            switch activityMode {
+            case .walking:
+                WalkingFormAdvisor.accumulate(metrics: &gaitMetrics, snapshot: formSnapshot)
+            case .running:
+                RunningFormAdvisor.accumulate(metrics: &gaitMetrics, snapshot: formSnapshot)
+            }
+        }
+        let smoothed = lowPass.pushAndAverage(keypointFrame)
 
         var leftRel: Double?
         var rightRel: Double?
@@ -357,17 +395,20 @@ final class PoseAnalysisPipeline {
         }
 
         let emitted = stepDetector.ingest(leftAnkleY: leftRel, rightAnkleY: rightRel)
+        // 固定位數寬度，避免左上角 HUD 隨步數位數增減而伸縮。
         let hud: String
         if let last = stepDetector.lastEvent {
-            let bpmText: String
-            if let bpm = last.cadenceBPM {
-                bpmText = String(format: " · %.0f bpm", bpm)
-            } else {
-                bpmText = ""
-            }
-            hud = "步數 L:\(stepDetector.leftSteps) R:\(stepDetector.rightSteps) 總:\(stepDetector.totalSteps) · 上一步 \(last.side.localizedLabel)\(bpmText)"
+            let bpm = last.cadenceBPM.map { String(format: "%3.0f", $0) } ?? "  —"
+            hud = String(
+                format: "L:%3d R:%3d 總:%3d ·%@ %@bpm",
+                stepDetector.leftSteps,
+                stepDetector.rightSteps,
+                stepDetector.totalSteps,
+                last.side.localizedLabel,
+                bpm
+            )
         } else {
-            hud = "步數 L:0 R:0 總:0"
+            hud = String(format: "L:%3d R:%3d 總:%3d ·—   —bpm", 0, 0, 0)
         }
 
         return PoseStepFrameResult(
@@ -397,21 +438,25 @@ final class PoseAnalysisPipeline {
             out.append(String(format: "平均步頻：%.0f bpm", avg))
         }
 
-        switch activityMode {
-        case .walking:
-            out.append(contentsOf: WalkingFormAdvisor.sessionSummary(metrics: gaitMetrics))
-        case .running:
-            out.append(contentsOf: RunningFormAdvisor.sessionSummary(metrics: gaitMetrics))
-        }
+        if !suppressSagittalFormAdvice {
+            switch activityMode {
+            case .walking:
+                out.append(contentsOf: WalkingFormAdvisor.sessionSummary(metrics: gaitMetrics))
+            case .running:
+                out.append(contentsOf: RunningFormAdvisor.sessionSummary(metrics: gaitMetrics))
+            }
 
-        if let profile = bodyProfile, let avg = avgCadence {
-            let personalized = GaitPersonalizationSummary.lines(
-                profile: profile,
-                avgCadence: avg,
-                totalSteps: total,
-                metrics: gaitMetrics
-            )
-            out.append(contentsOf: personalized)
+            if let profile = bodyProfile, let avg = avgCadence {
+                let personalized = GaitPersonalizationSummary.lines(
+                    profile: profile,
+                    avgCadence: avg,
+                    totalSteps: total,
+                    metrics: gaitMetrics
+                )
+                out.append(contentsOf: personalized)
+            }
+        } else {
+            out.append("背面視角：已略過前後向（前傾／跨步／著地）建議，僅保留左右對稱與背面特徵。")
         }
 
         if total > 0 {

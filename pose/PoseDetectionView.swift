@@ -2,7 +2,7 @@
 //  PoseDetectionView.swift
 //  pose
 //
-//  完整偵測管線（MediaPipe BlazePose Full 規則建議，或自訓模型 /predict）。
+//  完整偵測管線（QuickPose／原生 MediaPipe 相機／自訓模型 /predict）。
 //  相機權限改為「使用者按鈕後才請求」；授權前不掛載 QuickPoseCameraView。
 //
 
@@ -34,7 +34,7 @@ final class QuickPoseEngine: ObservableObject {
     private(set) var loopActive = false
     /// MediaPipe Full（`.good`）或自訓模型共用完整管線時由此指定模型。
     var assessmentEngine: PoseAssessmentEngine = .trainedModel
-    /// 自訓＋MediaPipe 模型或 MediaPipe 引擎時寫入 mediapipe.realm。
+    /// MediaPipe 引擎資料面時寫入 mediapipe.realm（僅原生 MediaPipe 路徑會為 true）。
     var prefersMediaPipeStore = false
     /// 僅「拍攝視角＝背面」時啟用背面特徵與分級信心門檻。
     var usesBackViewPipeline = false
@@ -81,7 +81,7 @@ final class QuickPoseEngine: ObservableObject {
     @Published var previewNodes: [PoseNode] = []
     @Published var isEngineStarting = false
     @Published var statusHint = ""
-    @Published var stepHUD = "步數 L:0 R:0 總:0"
+    @Published var stepHUD = String(format: "L:%3d R:%3d 總:%3d ·—   —bpm", 0, 0, 0)
     @Published var dbNodeCount = 0
     @Published var recentSteps: [StepEvent] = []
     @Published private(set) var frameCallbackCount = 0
@@ -188,36 +188,41 @@ final class QuickPoseEngine: ObservableObject {
                 return
             }
             if let landmarks, let pipeline = analysisPipeline {
-                let posture = PoseAdvice.evaluate(from: landmarks)
-                let gait = PoseGaitAdvisor.gaitAdvice(
-                    from: landmarks,
-                    profile: bodyGaitProfile,
-                    activity: activityMode
-                )
-                var mergedIssues = posture.issues
-                mergedIssues.formUnion(gait.issues)
-                var mergedLines = posture.lines
-                if !gait.lines.isEmpty {
-                    mergedLines.append(contentsOf: gait.lines)
-                }
                 // 寫入／串流使用定稿幀（手臂等低信心關節已插值或丟棄）。
                 let minKeep = (usesBackViewPipeline || usesSideViewPipeline) ? 0.25 : 0.5
                 let nodes = stabilized ?? (rawNodes ?? []).filter { $0.confidenceScore >= minKeep }
-                var finalLines = mergedLines
-                var finalIssues = mergedIssues
-                // 背面／側面特徵只在對應拍攝視角啟用。
+                var finalLines: [String] = []
+                var finalIssues = Set<PoseIssueCode>()
+
                 if usesBackViewPipeline {
+                    // 背面無法可靠量測前後向；只用左右對齊 + 背面特徵，略過走路／跑步前後建議。
+                    let posture = PoseAdvice.evaluate(from: landmarks)
+                    finalLines.append(contentsOf: posture.lines)
+                    finalIssues.formUnion(posture.issues)
                     let backFeatures = backViewPipeline.process(nodes: nodes)
                     if backFeatures.coreReliable || !backFeatures.adviceLines.isEmpty {
                         finalLines.append(contentsOf: backFeatures.adviceLines)
                     }
                     finalIssues.formUnion(backFeatures.debouncedIssues)
-                } else if usesSideViewPipeline {
-                    let sideFeatures = sideViewPreprocessor.process(nodes: nodes)
-                    if sideFeatures.coreReliable || !sideFeatures.adviceLines.isEmpty {
-                        finalLines.append(contentsOf: sideFeatures.adviceLines)
+                    finalIssues.subtract(PoseIssueCode.sagittalPlaneCodes)
+                } else {
+                    let posture = PoseAdvice.evaluate(from: landmarks)
+                    let gait = PoseGaitAdvisor.gaitAdvice(
+                        from: landmarks,
+                        profile: bodyGaitProfile,
+                        activity: activityMode
+                    )
+                    finalLines.append(contentsOf: posture.lines)
+                    finalLines.append(contentsOf: gait.lines)
+                    finalIssues.formUnion(posture.issues)
+                    finalIssues.formUnion(gait.issues)
+                    if usesSideViewPipeline {
+                        let sideFeatures = sideViewPreprocessor.process(nodes: nodes)
+                        if sideFeatures.coreReliable || !sideFeatures.adviceLines.isEmpty {
+                            finalLines.append(contentsOf: sideFeatures.adviceLines)
+                        }
+                        finalIssues.formUnion(sideFeatures.debouncedIssues)
                     }
-                    finalIssues.formUnion(sideFeatures.debouncedIssues)
                 }
                 let advice = PoseFrameAdvice(lines: finalLines, issues: finalIssues)
                 let store: PoseDatabase = prefersMediaPipeStore ? .mediaPipe : .shared
@@ -268,12 +273,17 @@ final class QuickPoseEngine: ObservableObject {
         overlayImage = nil
         previewNodes = []
         isEngineStarting = false
-        dbNodeCount = 0
-        recentSteps = []
-        stepHUD = "步數 L:0 R:0 總:0"
+        clearAnalysisBuffers()
+    }
+
+    /// 清空骨架緩衝／步數相關暫存，保留相機預覽畫面。
+    func clearAnalysisBuffers() {
         jointConfidenceFilter.reset()
         backViewPipeline.reset()
         sideViewPreprocessor.reset()
+        recentSteps = []
+        stepHUD = String(format: "L:%3d R:%3d 總:%3d ·—   —bpm", 0, 0, 0)
+        dbNodeCount = 0
     }
 
     /// 暫停前吐出緩衝中最後一幀（已做信心插值）。
@@ -301,71 +311,6 @@ enum DetectionSource: Hashable {
     case video(URL)
 }
 
-private struct PoseFrameAdvice {
-    var lines: [String]
-    var issues: Set<PoseIssueCode>
-}
-
-private enum PoseAdvice {
-    static func evaluate(from landmarks: QuickPose.Landmarks) -> PoseFrameAdvice {
-        let ls = landmarks.landmark(forBody: .shoulder(side: .left))
-        let rs = landmarks.landmark(forBody: .shoulder(side: .right))
-        let lh = landmarks.landmark(forBody: .hip(side: .left))
-        let rh = landmarks.landmark(forBody: .hip(side: .right))
-        let nose = landmarks.landmark(forBody: .nose)
-
-        func ok(_ p: QuickPose.Point3d) -> Bool {
-            p.visibility > 0.4 && p.presence > 0.4
-        }
-
-        guard ok(ls), ok(rs), ok(lh), ok(rh), ok(nose) else {
-            return PoseFrameAdvice(
-                lines: ["關節可見度不足，請後退一點、提高光線，或讓全身入鏡。"],
-                issues: [.lowVisibility]
-            )
-        }
-
-        var out: [String] = []
-        var issues: Set<PoseIssueCode> = []
-        let shoulderTilt = abs(ls.y - rs.y)
-        let hipTilt = abs(lh.y - rh.y)
-        let shoulderMidX = (ls.x + rs.x) / 2
-        let hipMidX = (lh.x + rh.x) / 2
-        let trunkOffset = abs(shoulderMidX - hipMidX)
-        let headOffset = abs(nose.x - shoulderMidX)
-
-        if shoulderTilt > 0.05 {
-            out.append("肩膀有明顯高低差，試著放鬆並讓雙肩保持水平。")
-            issues.insert(.shoulderTilt)
-        } else {
-            out.append("肩膀對齊良好。")
-        }
-
-        if hipTilt > 0.05 {
-            out.append("骨盆有些傾斜，重心可再平均分配到雙腳。")
-            issues.insert(.hipTilt)
-        } else {
-            out.append("骨盆穩定度不錯。")
-        }
-
-        if trunkOffset > 0.06 {
-            out.append("上半身有側傾，建議收核心，讓肩膀回到髖部正上方。")
-            issues.insert(.trunkSideBend)
-        } else {
-            out.append("軀幹中線穩定。")
-        }
-
-        if headOffset > 0.08 {
-            out.append("頭部偏離身體中線，請把視線與頭部回正。")
-            issues.insert(.headOffMidline)
-        } else {
-            out.append("頭部位置良好。")
-        }
-
-        return PoseFrameAdvice(lines: out, issues: issues)
-    }
-}
-
 private enum CameraGate: Equatable {
     case checking
     case needUserTap
@@ -382,6 +327,11 @@ struct PoseDetectionView: View {
         return raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// MediaPipe 原生引擎不需要 QuickPose SDK Key。
+    private var blocksDetectionForMissingSDKKey: Bool {
+        assessmentEngine != .mediaPipe && Self.sdkKeyIsPlaceholder
+    }
+
     private static var sdkKeyIsPlaceholder: Bool {
         let k = sdkKey.lowercased()
         return k.isEmpty || k.contains("your_sdk") || k == "your_sdk_key_here"
@@ -394,16 +344,64 @@ struct PoseDetectionView: View {
 
     /// 必須用 @StateObject 持有；@State 對 class 不穩定，相機 delegate 可能綁到舊實例而 onFrame 永不觸發。
     @StateObject private var quickPoseEngine = QuickPoseEngine()
+    /// MediaPipe 引擎專用：Google Pose Landmarker（不經 QuickPose）。
+    @StateObject private var mediaPipeEngine = MediaPipeNativePoseEngine()
 
     @State private var cameraGate: CameraGate = .checking
     /// 步態分析管線（影格處理由 quickPoseEngine 讀取此參考）。
     @State private var analysisPipeline = PoseAnalysisPipeline()
 
+    /// MediaPipe 引擎，或自訓選 MediaPipe 品質模型：相機／影片都走原生 Landmarker。
+    private var usesNativeMediaPipe: Bool {
+        assessmentEngine.usesNativeMediaPipe(qualityModel: modeStore.trainedQualityModel)
+    }
+
+    private var activeAdviceLines: [String] {
+        usesNativeMediaPipe ? mediaPipeEngine.adviceLines : quickPoseEngine.adviceLines
+    }
+
+    private var activeStatusHint: String {
+        usesNativeMediaPipe ? mediaPipeEngine.statusHint : quickPoseEngine.statusHint
+    }
+
+    private var activeStepHUD: String {
+        usesNativeMediaPipe ? mediaPipeEngine.stepHUD : quickPoseEngine.stepHUD
+    }
+
+    private var activeDbNodeCount: Int {
+        usesNativeMediaPipe ? mediaPipeEngine.dbNodeCount : quickPoseEngine.dbNodeCount
+    }
+
+    @MainActor
+    private func setDetectionActive(_ active: Bool) {
+        if usesNativeMediaPipe {
+            quickPoseEngine.detectionActive = false
+            switch detectionSource {
+            case .liveCamera:
+                mediaPipeEngine.detectionActive = active
+            case .video:
+                mediaPipeEngine.setVideoDetectionActive(active)
+            }
+        } else {
+            mediaPipeEngine.detectionActive = false
+            if case .video = detectionSource {
+                mediaPipeEngine.setVideoDetectionActive(false)
+            }
+            quickPoseEngine.detectionActive = active
+        }
+    }
+
     @State private var isPaused = true
     @State private var countdownSeconds: Int?
     @State private var countdownTask: Task<Void, Never>?
-    private static let cameraCountdownSeconds = 5
+    /// 影片模式仍用短倒數；相機改走 LiveTimedSession 狀態機。
     private static let videoCountdownSeconds = 2
+    /// 實時相機：idle → preparing → analyzing → completed。
+    @State private var liveSessionState: LiveSessionState = .idle
+    @State private var liveSessionTask: Task<Void, Never>?
+    @State private var sessionAudio = SessionAudioCues()
+    /// 實時相機前後鏡頭（跑步機側面／背面建議用後鏡頭）。
+    @AppStorage("poseUseFrontCamera") private var useFrontCamera = false
     @State private var engineAttached = false
     @State private var stepFlashSide: PoseFootSide?
     @State private var stepFlashOpacity: Double = 0
@@ -413,6 +411,8 @@ struct PoseDetectionView: View {
     @State private var showPhotosPicker = false
     @State private var showFileImporter = false
     @State private var isLoadingVideo = false
+    /// 確認影片後到第一幀畫面出現前的等待（避免黑屏像當機）。
+    @State private var isAwaitingVideoFirstFrame = false
     @State private var showSummary = false
     @State private var summaryLines: [String] = []
     @State private var videoLoadError: String?
@@ -427,7 +427,7 @@ struct PoseDetectionView: View {
     @State private var historySavedForSession = false
     @StateObject private var summaryStore = SummaryStore()
 
-    /// 目前應開啟的本機節點庫（MediaPipe 引擎或自訓＋MediaPipe 模型 → mediapipe.realm）。
+    /// 目前應開啟的本機節點庫（MediaPipe 引擎 → mediapipe.realm，其餘 → pose.realm）。
     private var nodeDatabase: PoseDatabase {
         usesMediaPipeDataPlane ? .mediaPipe : .shared
     }
@@ -471,37 +471,38 @@ struct PoseDetectionView: View {
         modeStore.engine
     }
 
-    /// 自訓模型可再選骨架／品質模型族系：MediaPipe → mediapipe.realm + /mediapipe/predict。
-    private var usesMediaPipeTrainedPipeline: Bool {
-        assessmentEngine == .trainedModel && modeStore.skeletonModel == .mediaPipe
-    }
-
-    /// 寫入與預測要走 MediaPipe 管線（獨立引擎，或自訓＋MediaPipe 模型）。
+    /// MediaPipe 引擎或自訓 MediaPipe 模型：mediapipe.realm + /mediapipe/predict。
     private var usesMediaPipeDataPlane: Bool {
-        assessmentEngine == .mediaPipe || usesMediaPipeTrainedPipeline
+        usesNativeMediaPipe
     }
 
     private var activePredictPath: String {
-        usesMediaPipeDataPlane ? "/mediapipe/predict" : assessmentEngine.predictPath
+        assessmentEngine.predictPath(qualityModel: modeStore.trainedQualityModel)
     }
 
     private var activePredictEngineName: String {
-        usesMediaPipeDataPlane ? "mediapipe" : assessmentEngine.predictEngineName
+        assessmentEngine.predictEngineName(qualityModel: modeStore.trainedQualityModel)
+    }
+
+    private var activeHudBadgeTitle: String {
+        assessmentEngine.hudBadgeTitle(qualityModel: modeStore.trainedQualityModel)
     }
 
     /// 相機／影片來源切換時強制 remount，確保 onAppear → start 生命週期與原生模式一致。
     private var cameraContentID: String {
         switch detectionSource {
-        case .liveCamera: return "live-camera"
-        case .video(let url): return "video-\(url.absoluteString)"
+        case .liveCamera:
+            return "live-camera-\(useFrontCamera ? "front" : "back")"
+        case .video(let url):
+            return "video-\(url.absoluteString)"
         }
     }
 
-    /// 前鏡頭預覽是鏡像，節點 x 要翻轉才會對上身體。
+    /// 前鏡頭預覽是鏡像，節點 x 要翻轉才會對上身體；後鏡頭不翻。
     private var skeletonFlipsHorizontally: Bool {
         switch detectionSource {
         case .liveCamera:
-            return !ProcessInfo.processInfo.isiOSAppOnMac
+            return useFrontCamera && !ProcessInfo.processInfo.isiOSAppOnMac
         case .video:
             return false
         }
@@ -528,7 +529,13 @@ struct PoseDetectionView: View {
                             showHistory = true
                         }
                     },
-                    onClose: { showSummary = false }
+                    onClose: {
+                        showSummary = false
+                        if liveSessionState == .completed {
+                            liveSessionState = .idle
+                            applyPausedIdleState()
+                        }
+                    }
                 )
             }
             .sheet(isPresented: $showHistory) {
@@ -577,35 +584,89 @@ struct PoseDetectionView: View {
 
     private var contentWithOverlays: some View {
         contentWithLifecycle
-            .overlay {
-                if let pending = pendingVideo {
-                    pendingConfirmOverlay(pending)
-                }
-            }
-            .overlay {
-                if let sec = countdownSeconds {
-                    countdownOverlay(seconds: sec)
-                }
-            }
+            .overlay { pendingVideoOverlay }
+            .overlay { videoCountdownOverlay }
+            .overlay { liveSessionPreparingOverlay }
+            .overlay(alignment: .top) { liveSessionAnalyzingOverlay }
+            .overlay { videoLoadingOverlay }
+    }
+
+    @ViewBuilder
+    private var pendingVideoOverlay: some View {
+        if let pending = pendingVideo {
+            pendingConfirmOverlay(pending)
+        }
+    }
+
+    @ViewBuilder
+    private var videoCountdownOverlay: some View {
+        if let sec = countdownSeconds, !liveSessionState.isBusy {
+            countdownOverlay(seconds: sec)
+        }
+    }
+
+    @ViewBuilder
+    private var liveSessionPreparingOverlay: some View {
+        if case .preparing(let sec) = liveSessionState {
+            livePreparingOverlay(seconds: sec)
+        }
+    }
+
+    @ViewBuilder
+    private var liveSessionAnalyzingOverlay: some View {
+        if case .analyzing(let sec) = liveSessionState {
+            liveAnalyzingBanner(remaining: sec)
+        }
+    }
+
+    @ViewBuilder
+    private var videoLoadingOverlay: some View {
+        if isLoadingVideo || isAwaitingVideoFirstFrame {
+            videoWaitingOverlay(
+                message: isLoadingVideo ? "正在讀取影片，請稍候…" : "正在準備影片畫面…"
+            )
+        }
     }
 
     private var contentWithLifecycle: some View {
-        rootZStack
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .ignoresSafeArea()
-            .onAppear {
-                refreshCameraGate()
-                syncAssessmentEngine()
-                syncActivityMode()
-                syncCaptureViewMode()
-                wireQuickPoseEngineCallbacks()
-                syncBodyGaitProfile()
+        contentWithMediaImport
+            .onDisappear(perform: handleDetectionViewDisappear)
+    }
+
+    private var contentWithMediaImport: some View {
+        contentWithModeObservers
+            .onChange(of: pickedItem) { _, newItem in
+                Task { await handlePickedItem(newItem) }
             }
+            .photosPicker(isPresented: $showPhotosPicker, selection: $pickedItem, matching: .videos)
+            .fileImporter(
+                isPresented: $showFileImporter,
+                allowedContentTypes: [.movie, .mpeg4Movie, .quickTimeMovie, .avi],
+                allowsMultipleSelection: false,
+                onCompletion: handleImportedFile
+            )
+            .alert("影片載入失敗", isPresented: videoLoadErrorPresented) {
+                Button("好") { videoLoadError = nil }
+            } message: {
+                Text(videoLoadError ?? "")
+            }
+    }
+
+    private var videoLoadErrorPresented: Binding<Bool> {
+        Binding(
+            get: { videoLoadError != nil },
+            set: { if !$0 { videoLoadError = nil } }
+        )
+    }
+
+    private var contentWithModeObservers: some View {
+        contentWithPreviewObservers
+            .onAppear(perform: handleDetectionViewAppear)
             .onChange(of: modeStore.engine) { _, newEngine in
                 handleAssessmentEngineChange(newEngine)
             }
-            .onChange(of: modeStore.skeletonModel) { _, _ in
-                handleSkeletonModelChange()
+            .onChange(of: modeStore.trainedQualityModel) { oldModel, newModel in
+                handleTrainedQualityModelChange(from: oldModel, to: newModel)
             }
             .onChange(of: modeStore.activity) { _, _ in
                 syncActivityMode()
@@ -614,8 +675,44 @@ struct PoseDetectionView: View {
             .onChange(of: modeStore.captureView) { _, _ in
                 syncCaptureViewMode()
             }
+            .onChange(of: useFrontCamera) { _, newValue in
+                if usesNativeMediaPipe {
+                    mediaPipeEngine.switchCamera(useFrontCamera: newValue)
+                }
+            }
             .onChange(of: auth.userProfile) { _, _ in
                 syncBodyGaitProfile()
+            }
+    }
+
+    private var contentWithPreviewObservers: some View {
+        contentRoot
+            .onChange(of: quickPoseEngine.overlayImage) { _, newImage in
+                if isAwaitingVideoFirstFrame, newImage != nil {
+                    isAwaitingVideoFirstFrame = false
+                }
+            }
+            .onChange(of: quickPoseEngine.frameCallbackCount) { _, count in
+                if isAwaitingVideoFirstFrame, count > 0, quickPoseEngine.overlayImage != nil {
+                    isAwaitingVideoFirstFrame = false
+                }
+            }
+            .onChange(of: mediaPipeEngine.previewNodes.count) { _, count in
+                if isAwaitingVideoFirstFrame, usesNativeMediaPipe, count > 0 {
+                    isAwaitingVideoFirstFrame = false
+                }
+            }
+            .onChange(of: mediaPipeEngine.videoPlayer) { _, player in
+                if isAwaitingVideoFirstFrame, usesNativeMediaPipe, player != nil {
+                    isAwaitingVideoFirstFrame = false
+                }
+            }
+            .task(id: isAwaitingVideoFirstFrame) {
+                guard isAwaitingVideoFirstFrame else { return }
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                if isAwaitingVideoFirstFrame {
+                    isAwaitingVideoFirstFrame = false
+                }
             }
             .task(id: cameraGate) {
                 guard cameraGate == .authorized, case .liveCamera = detectionSource else { return }
@@ -624,35 +721,39 @@ struct PoseDetectionView: View {
             .task(id: detectionSource) {
                 await handleDetectionSourceChange()
             }
-            .onChange(of: pickedItem) { _, newItem in
-                Task { await handlePickedItem(newItem) }
-            }
-            .photosPicker(isPresented: $showPhotosPicker, selection: $pickedItem, matching: .videos)
-            .fileImporter(
-                isPresented: $showFileImporter,
-                allowedContentTypes: [.movie, .mpeg4Movie, .quickTimeMovie, .avi],
-                allowsMultipleSelection: false
-            ) { result in
-                handleImportedFile(result)
-            }
-            .alert("影片載入失敗", isPresented: Binding(
-                get: { videoLoadError != nil },
-                set: { if !$0 { videoLoadError = nil } }
-            )) {
-                Button("好") { videoLoadError = nil }
-            } message: {
-                Text(videoLoadError ?? "")
-            }
-            .onDisappear {
-                cancelCountdown()
-                quickPoseEngine.detectionActive = false
-                quickPoseEngine.stopLoop()
-                finishDatabaseSession()
-                stopStreaming()
-                engineAttached = false
-                quickPoseEngine.resetSessionUI()
-                analysisPipeline.reset()
-            }
+    }
+
+    private var contentRoot: some View {
+        rootZStack
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .ignoresSafeArea()
+    }
+
+    @MainActor
+    private func handleDetectionViewAppear() {
+        refreshCameraGate()
+        syncAssessmentEngine()
+        syncActivityMode()
+        syncCaptureViewMode()
+        wireQuickPoseEngineCallbacks()
+        syncBodyGaitProfile()
+    }
+
+    @MainActor
+    private func handleDetectionViewDisappear() {
+        cancelCountdown()
+        cancelLiveSessionTimer()
+        sessionAudio.stopAll()
+        liveSessionState = .idle
+        setDetectionActive(false)
+        mediaPipeEngine.shutdown()
+        quickPoseEngine.stopLoop()
+        finishDatabaseSession()
+        stopStreaming()
+        engineAttached = false
+        quickPoseEngine.resetSessionUI()
+        mediaPipeEngine.clearAnalysisBuffers()
+        analysisPipeline.reset()
     }
 
     @ViewBuilder
@@ -750,16 +851,23 @@ struct PoseDetectionView: View {
 
     @MainActor
     private var stepEventList: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(quickPoseEngine.recentSteps.suffix(5).reversed()) { event in
-                let interval = event.intervalFromPrevious.map { String(format: "+%.2fs", $0) } ?? "—"
-                let bpm = event.cadenceBPM.map { String(format: "%.0f bpm", $0) } ?? "—"
-                let color: Color = event.side == .left ? .cyan : .pink
-                Text("第 \(event.index) 步  \(event.side.localizedLabel)腳   \(interval)   \(bpm)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(color)
+        let events = usesNativeMediaPipe
+            ? mediaPipeEngine.recentSteps
+            : quickPoseEngine.recentSteps
+        return VStack(alignment: .leading, spacing: 4) {
+            ForEach(events.suffix(5).reversed()) { event in
+                stepEventRow(event)
             }
         }
+    }
+
+    private func stepEventRow(_ event: StepEvent) -> some View {
+        let interval = event.intervalFromPrevious.map { String(format: "+%.2fs", $0) } ?? "—"
+        let bpm = event.cadenceBPM.map { String(format: "%.0f bpm", $0) } ?? "—"
+        let color: Color = event.side == .left ? .cyan : .pink
+        return Text("第 \(event.index) 步  \(event.side.localizedLabel)腳   \(interval)   \(bpm)")
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(color)
     }
 
     /// 底部固定高度區塊；內容可垂直滑動，避免選項變多後資料庫／選影片被裁切。
@@ -773,10 +881,6 @@ struct PoseDetectionView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
 
                 DetectionEnginePickerRow()
-                // 僅「自訓模型」顯示：選 QuickPose 或 MediaPipe 的自訓品質模型／資料庫。
-                if assessmentEngine == .trainedModel {
-                    SkeletonModelPickerRow()
-                }
                 GaitActivityPickerRow()
                 CaptureViewPickerRow()
                 bottomControls
@@ -784,7 +888,7 @@ struct PoseDetectionView: View {
                 Button {
                     showDatabase = true
                 } label: {
-                    Label("\(nodeDatabase.kind.buttonTitle)（本次 \(quickPoseEngine.dbNodeCount) 筆）", systemImage: "cylinder.split.1x2.fill")
+                    Label("\(nodeDatabase.kind.buttonTitle)（本次 \(activeDbNodeCount) 筆）", systemImage: "cylinder.split.1x2.fill")
                         .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
@@ -802,7 +906,7 @@ struct PoseDetectionView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: panelHeight + safeBottom, alignment: .top)
         .background(.black.opacity(0.65))
-        .animation(nil, value: quickPoseEngine.adviceLines.count)
+        .animation(nil, value: activeAdviceLines.count)
     }
 
     @MainActor
@@ -812,7 +916,7 @@ struct PoseDetectionView: View {
             Text(assessmentEngine.adviceSectionTitle)
                 .font(.headline)
                 .foregroundStyle(.white)
-            ForEach(Array(quickPoseEngine.adviceLines.enumerated()), id: \.offset) { _, line in
+            ForEach(Array(activeAdviceLines.enumerated()), id: \.offset) { _, line in
                 Text("• \(line)")
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.95))
@@ -848,7 +952,7 @@ struct PoseDetectionView: View {
         case .liveCamera:
             HStack(spacing: 10) {
                 Button {
-                    resumeDetectionFromUser()
+                    startLiveTimedSessionFromUser()
                 } label: {
                     Label("開始", systemImage: "play.fill")
                         .font(.subheadline.weight(.semibold))
@@ -857,20 +961,35 @@ struct PoseDetectionView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
-                .disabled(!isPaused || Self.sdkKeyIsPlaceholder || countdownSeconds != nil)
+                .disabled(liveSessionState.isBusy || blocksDetectionForMissingSDKKey || countdownSeconds != nil)
 
                 Button {
-                    pauseDetectionFromUser()
+                    cancelLiveTimedSessionFromUser()
                 } label: {
-                    Label("暫停", systemImage: "pause.fill")
+                    Label("取消", systemImage: "xmark.circle.fill")
                         .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.orange)
-                .disabled(isPaused || !engineAttached || Self.sdkKeyIsPlaceholder || countdownSeconds != nil)
+                .tint(.red)
+                .disabled(!liveSessionState.isBusy || blocksDetectionForMissingSDKKey)
             }
+            Button {
+                guard !liveSessionState.isBusy else { return }
+                useFrontCamera.toggle()
+            } label: {
+                Label(
+                    useFrontCamera ? "目前：前鏡頭（點擊切換後鏡頭）" : "目前：後鏡頭（點擊切換前鏡頭）",
+                    systemImage: "camera.rotate"
+                )
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+            }
+            .buttonStyle(.bordered)
+            .tint(.cyan)
+            .disabled(liveSessionState.isBusy || ProcessInfo.processInfo.isiOSAppOnMac)
             videoImportButtons(primaryLabel: "上傳影片偵測")
 
         case .video:
@@ -885,7 +1004,7 @@ struct PoseDetectionView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
-                .disabled(!isPaused || Self.sdkKeyIsPlaceholder || countdownSeconds != nil)
+                .disabled(!isPaused || blocksDetectionForMissingSDKKey || countdownSeconds != nil)
 
                 Button {
                     pauseDetectionFromUser()
@@ -897,7 +1016,7 @@ struct PoseDetectionView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.orange)
-                .disabled(isPaused || !engineAttached || Self.sdkKeyIsPlaceholder || countdownSeconds != nil)
+                .disabled(isPaused || !engineAttached || blocksDetectionForMissingSDKKey || countdownSeconds != nil)
             }
             HStack(spacing: 10) {
                 Button {
@@ -916,7 +1035,7 @@ struct PoseDetectionView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.indigo)
-                .disabled(isAnalyzingVideoQuality || Self.sdkKeyIsPlaceholder)
+                .disabled(isAnalyzingVideoQuality || blocksDetectionForMissingSDKKey)
 
                 Button {
                     switchBackToCamera()
@@ -1003,7 +1122,7 @@ struct PoseDetectionView: View {
 
     @MainActor
     private func resetStepUIState() {
-        quickPoseEngine.stepHUD = "步數 L:0 R:0 總:0"
+        quickPoseEngine.stepHUD = String(format: "L:%3d R:%3d 總:%3d ·—   —bpm", 0, 0, 0)
         quickPoseEngine.recentSteps = []
         stepFlashSide = nil
         stepFlashOpacity = 0
@@ -1025,62 +1144,146 @@ struct PoseDetectionView: View {
     }
 
     @MainActor
+    private func wireMediaPipeEngineCallbacks() {
+        mediaPipeEngine.analysisPipeline = analysisPipeline
+        mediaPipeEngine.prefersMediaPipeStore = usesMediaPipeDataPlane
+        mediaPipeEngine.activityMode = modeStore.activity
+        mediaPipeEngine.syncCaptureView(modeStore.captureView)
+        mediaPipeEngine.bodyGaitProfile = BodyGaitProfile(userProfile: auth.userProfile)
+        mediaPipeEngine.onStreamEnqueue = { [stream] nodes, ts in
+            stream.enqueue(nodes: nodes, timestamp: ts)
+        }
+        mediaPipeEngine.onStepEvents = { emitted in
+            handle(emitted: emitted)
+        }
+        mediaPipeEngine.onVideoPlaybackEnded = { [self] in
+            Task { @MainActor in
+                guard case .video = detectionSource, usesNativeMediaPipe else { return }
+                guard engineAttached || mediaPipeEngine.detectionActive else { return }
+                pauseDetectionFromUser()
+            }
+        }
+    }
+
+    /// 依目前引擎啟動／停止原生 MediaPipe 或 QuickPose。
+    @MainActor
+    private func syncActivePoseRuntime() {
+        wireMediaPipeEngineCallbacks()
+        if usesNativeMediaPipe {
+            quickPoseEngine.detectionActive = false
+            quickPoseEngine.stopLoop()
+            switch detectionSource {
+            case .liveCamera:
+                mediaPipeEngine.setVideoDetectionActive(false)
+                if !mediaPipeEngine.isRunning || mediaPipeEngine.videoPlayer != nil {
+                    mediaPipeEngine.start(useFrontCamera: useFrontCamera)
+                } else {
+                    mediaPipeEngine.switchCamera(useFrontCamera: useFrontCamera)
+                }
+                mediaPipeEngine.detectionActive = !isPaused && engineAttached
+            case .video(let url):
+                mediaPipeEngine.stop()
+                mediaPipeEngine.prepareVideo(url: url)
+                if !isPaused && engineAttached {
+                    mediaPipeEngine.setVideoDetectionActive(true)
+                }
+            }
+        } else {
+            mediaPipeEngine.detectionActive = false
+            mediaPipeEngine.setVideoDetectionActive(false)
+            if mediaPipeEngine.isRunning || mediaPipeEngine.videoPlayer != nil {
+                mediaPipeEngine.stop()
+            }
+            quickPoseEngine.startLoopIfNeeded()
+        }
+    }
+
+    @MainActor
     private func syncAssessmentEngine() {
         quickPoseEngine.assessmentEngine = assessmentEngine
         quickPoseEngine.prefersMediaPipeStore = usesMediaPipeDataPlane
+        mediaPipeEngine.prefersMediaPipeStore = usesMediaPipeDataPlane
     }
 
     @MainActor
     private func syncActivityMode() {
         let activity = modeStore.activity
         quickPoseEngine.activityMode = activity
+        mediaPipeEngine.activityMode = activity
         analysisPipeline.activityMode = activity
     }
 
     @MainActor
     private func syncCaptureViewMode() {
         quickPoseEngine.syncConfidenceFilterForCaptureView(modeStore.captureView)
+        mediaPipeEngine.syncCaptureView(modeStore.captureView)
+        // 背面模式不產生前後向（前傾／跨步／著地）亂分析建議。
+        analysisPipeline.suppressSagittalFormAdvice = modeStore.isBackView
     }
 
     @MainActor
     private func handleAssessmentEngineChange(_ newEngine: PoseAssessmentEngine) {
         let previous = quickPoseEngine.assessmentEngine
+        let quality = modeStore.trainedQualityModel
         syncAssessmentEngine()
         guard previous != newEngine else { return }
         livePrediction = nil
         videoQualityResult = nil
         finishDatabaseSession()
         stopStreaming()
-        if engineAttached, quickPoseEngine.detectionActive {
+        syncActivePoseRuntime()
+        if engineAttached, (quickPoseEngine.detectionActive || mediaPipeEngine.detectionActive) {
             sessionIsMediaPipe = usesMediaPipeDataPlane
             dbSessionID = nodeDatabase.beginSession(sourceLabel: currentSourceLabel)
             quickPoseEngine.dbNodeCount = 0
+            mediaPipeEngine.dbNodeCount = 0
             startStreaming()
         }
-        if PoseAssessmentEngine.requiresPoseRuntimeRestart(from: previous, to: newEngine) {
+        let needsNativeSwitch = PoseAssessmentEngine.requiresPoseRuntimeRestart(
+            from: previous,
+            to: newEngine,
+            fromQuality: quality,
+            toQuality: quality
+        )
+        if needsNativeSwitch {
+            quickPoseEngine.statusHint = "已切換\(newEngine.hudBadgeTitle(qualityModel: quality))"
+            mediaPipeEngine.statusHint = "已切換\(newEngine.hudBadgeTitle(qualityModel: quality))"
+        } else if PoseAssessmentEngine.requiresPoseRuntimeRestart(from: previous, to: newEngine) {
             quickPoseEngine.scheduleRestart(hint: "正在切換\(newEngine.title)骨架…")
         } else {
             quickPoseEngine.statusHint = "已切換\(newEngine.title)，骨架持續顯示"
         }
     }
 
-    /// 自訓模型下切換 QuickPose／MediaPipe 品質模型：換 Realm 與 /predict 路徑，不刪舊資料。
     @MainActor
-    private func handleSkeletonModelChange() {
-        guard assessmentEngine == .trainedModel else { return }
-        syncAssessmentEngine()
+    private func handleTrainedQualityModelChange(from oldModel: TrainedQualityModel, to newModel: TrainedQualityModel) {
+        guard assessmentEngine == .trainedModel, oldModel != newModel else {
+            syncAssessmentEngine()
+            return
+        }
         livePrediction = nil
         videoQualityResult = nil
         finishDatabaseSession()
         stopStreaming()
-        if engineAttached, quickPoseEngine.detectionActive {
+        syncAssessmentEngine()
+        syncActivePoseRuntime()
+        if engineAttached, (quickPoseEngine.detectionActive || mediaPipeEngine.detectionActive) {
             sessionIsMediaPipe = usesMediaPipeDataPlane
             dbSessionID = nodeDatabase.beginSession(sourceLabel: currentSourceLabel)
             quickPoseEngine.dbNodeCount = 0
+            mediaPipeEngine.dbNodeCount = 0
             startStreaming()
         }
-        quickPoseEngine.statusHint = "已切換\(modeStore.skeletonModel.title)，按「開始」寫入對應資料庫"
+        let badge = assessmentEngine.hudBadgeTitle(qualityModel: newModel)
+        if oldModel.usesNativeMediaPipe != newModel.usesNativeMediaPipe {
+            quickPoseEngine.statusHint = "已切換\(badge)"
+            mediaPipeEngine.statusHint = "已切換\(badge)"
+        } else {
+            quickPoseEngine.statusHint = "已切換辨識模型：\(newModel.shortTitle)"
+            mediaPipeEngine.statusHint = "已切換辨識模型：\(newModel.shortTitle)"
+        }
     }
+
 
     @MainActor
     private func syncBodyGaitProfile() {
@@ -1093,6 +1296,9 @@ struct PoseDetectionView: View {
     private func handlePickedItem(_ item: PhotosPickerItem?) async {
         guard let item else { return }
         isLoadingVideo = true
+        // 先讓「等待中」overlay 畫出來，再開始讀檔，避免畫面像當掉。
+        await Task.yield()
+        try? await Task.sleep(nanoseconds: 80_000_000)
         defer {
             isLoadingVideo = false
             pickedItem = nil
@@ -1104,8 +1310,12 @@ struct PoseDetectionView: View {
             }
             if let data = try await item.loadTransferable(type: Data.self) {
                 let name = item.itemIdentifier ?? "video.mov"
-                let dst = URL.temporaryDirectory.appendingPathComponent(UUID().uuidString + "-" + URL(fileURLWithPath: name).lastPathComponent)
-                try data.write(to: dst)
+                let dst = URL.temporaryDirectory.appendingPathComponent(
+                    UUID().uuidString + "-" + URL(fileURLWithPath: name).lastPathComponent
+                )
+                try await Task.detached(priority: .userInitiated) {
+                    try data.write(to: dst)
+                }.value
                 presentPendingMovie(url: dst, displayName: dst.lastPathComponent)
                 return
             }
@@ -1122,17 +1332,25 @@ struct PoseDetectionView: View {
             videoLoadError = "無法開啟檔案：\(error.localizedDescription)"
         case .success(let urls):
             guard let url = urls.first else { return }
-            let accessed = url.startAccessingSecurityScopedResource()
-            defer {
-                if accessed { url.stopAccessingSecurityScopedResource() }
-            }
-            do {
-                let dst = URL.temporaryDirectory.appendingPathComponent(UUID().uuidString + "-" + url.lastPathComponent)
-                try? FileManager.default.removeItem(at: dst)
-                try FileManager.default.copyItem(at: url, to: dst)
-                presentPendingMovie(url: dst, displayName: url.lastPathComponent)
-            } catch {
-                videoLoadError = "影片複製失敗：\(error.localizedDescription)"
+            isLoadingVideo = true
+            Task { @MainActor in
+                defer { isLoadingVideo = false }
+                let accessed = url.startAccessingSecurityScopedResource()
+                defer {
+                    if accessed { url.stopAccessingSecurityScopedResource() }
+                }
+                do {
+                    let dst = URL.temporaryDirectory.appendingPathComponent(
+                        UUID().uuidString + "-" + url.lastPathComponent
+                    )
+                    try await Task.detached(priority: .userInitiated) {
+                        try? FileManager.default.removeItem(at: dst)
+                        try FileManager.default.copyItem(at: url, to: dst)
+                    }.value
+                    presentPendingMovie(url: dst, displayName: url.lastPathComponent)
+                } catch {
+                    videoLoadError = "影片複製失敗：\(error.localizedDescription)"
+                }
             }
         }
     }
@@ -1148,11 +1366,11 @@ struct PoseDetectionView: View {
         pendingVideo = PendingVideo(url: url, displayName: displayName)
     }
 
-    /// 停止資料處理與 session；切換來源或離開偵測時使用（會 stop QuickPose）。
+    /// 停止資料處理與 session；切換來源或離開偵測時使用（會 stop QuickPose／MediaPipe 寫入）。
     @MainActor
     private func stopDetectionActivity(fullReset: Bool) {
         cancelCountdown()
-        quickPoseEngine.detectionActive = false
+        setDetectionActive(false)
         let snap = stream.snapshotSessionFrames()
         if !snap.isEmpty {
             cachedSessionFrames = snap
@@ -1161,6 +1379,12 @@ struct PoseDetectionView: View {
         stopStreaming()
         engineAttached = false
         quickPoseEngine.resetSessionUI()
+        if usesNativeMediaPipe {
+            mediaPipeEngine.previewNodes = []
+            mediaPipeEngine.fpsText = "FPS: —"
+            mediaPipeEngine.statusHint = ""
+            mediaPipeEngine.adviceLines = ["MediaPipe 原生骨架待機中"]
+        }
         if fullReset {
             analysisPipeline.reset()
             resetStepUIState()
@@ -1169,13 +1393,16 @@ struct PoseDetectionView: View {
         }
     }
 
-    /// 使用者暫停：只停資料寫入，QuickPose 引擎保持運轉（官方 demo 僅 onDisappear 才 stop）。
+    /// 使用者暫停：只停資料寫入，相機 runtime 保持運轉（官方 demo 僅 onDisappear 才 stop）。
     @MainActor
     private func pauseDetectionProcessing(fullReset: Bool, preserveAnalysis: Bool = false) {
         cancelCountdown()
-        quickPoseEngine.detectionActive = false
+        setDetectionActive(false)
         // 吐出信心過濾緩衝的最後一幀再截串流影格。
-        if let flushed = quickPoseEngine.flushStabilizedNodes(), !flushed.isEmpty {
+        let flushedNodes = usesNativeMediaPipe
+            ? mediaPipeEngine.flushStabilizedNodes()
+            : quickPoseEngine.flushStabilizedNodes()
+        if let flushed = flushedNodes, !flushed.isEmpty {
             let ts = Date().timeIntervalSince1970
             sessionDatabase.recordFrame(nodes: flushed)
             if assessmentEngine.usesQualityPredict {
@@ -1210,9 +1437,10 @@ struct PoseDetectionView: View {
         stopDetectionActivity(fullReset: true)
         quickPoseEngine.fpsText = "FPS: —"
         quickPoseEngine.adviceLines = ["正在載入影片…"]
+        isAwaitingVideoFirstFrame = true
         detectionSource = .video(pending.url)
         isPaused = true
-        beginDetectionCountdown(isVideo: true)
+        beginVideoDetectionCountdown()
     }
 
     @MainActor
@@ -1293,22 +1521,26 @@ struct PoseDetectionView: View {
     }
 
     /// 開始一段即時串流（開後端 session + 啟動每 0.5 秒批次上傳與每秒預測的迴圈）。
+    /// 相機與影片共用 `/predict`；若 `/sessions` 開不起來，仍退回本機視窗預測（與影片模式一致），不再整段中止成「未連線」。
     @MainActor
     private func startStreaming() {
         livePrediction = nil
         predictionBuffer.reset()
         guard assessmentEngine.usesQualityPredict else { return }
         let source = currentSourceLabel
-        let uploadLiveFrames = assessmentEngine.usesTrainedModelPredict
+        let preferUpload = assessmentEngine.usesTrainedModelPredict
         stream.predictPath = activePredictPath
         stream.predictEngine = activePredictEngineName
         streamLoopTask?.cancel()
         streamLoopTask = Task {
-            if uploadLiveFrames {
+            var uploadLiveFrames = preferUpload
+            if preferUpload {
                 let ok = await stream.begin(mode: .predict, sourceLabel: source)
-                guard ok else {
-                    await MainActor.run { livePrediction = LivePrediction(label: nil, probabilityGood: 0, note: "未連線/未登入") }
-                    return
+                if !ok {
+                    // /sessions 開不起時安靜退回本機視窗 /predict（與影片模式相同），
+                    // 不要把暫時狀態寫進 HUD，否則會一直顯示成「品質異常」。
+                    stream.preparePredictWindow()
+                    uploadLiveFrames = false
                 }
             } else {
                 stream.preparePredictWindow()
@@ -1342,8 +1574,9 @@ struct PoseDetectionView: View {
     }
 
     /// 結束串流：停止迴圈並回報統計。
+    /// - Parameter preserveDisplayPrediction: 完成採樣後保留 HUD／摘要用的預測結果，不要被清掉。
     @MainActor
-    private func stopStreaming() {
+    private func stopStreaming(preserveDisplayPrediction: Bool = false) {
         streamLoopTask?.cancel()
         streamLoopTask = nil
         let total = analysisPipeline.totalSteps
@@ -1351,8 +1584,10 @@ struct PoseDetectionView: View {
         let right = analysisPipeline.rightSteps
         let bpm = analysisPipeline.avgCadenceBPM
         Task { await stream.end(totalSteps: total, leftSteps: left, rightSteps: right, avgCadenceBPM: bpm) }
-        livePrediction = nil
-        predictionBuffer.reset()
+        if !preserveDisplayPrediction {
+            livePrediction = nil
+            predictionBuffer.reset()
+        }
     }
 
     @MainActor
@@ -1414,27 +1649,47 @@ struct PoseDetectionView: View {
     private func switchBackToCamera() {
         stopDetectionActivity(fullReset: true)
         isPaused = true
+        isAwaitingVideoFirstFrame = false
+        isLoadingVideo = false
         quickPoseEngine.fpsText = "FPS: —（已暫停）"
-        quickPoseEngine.adviceLines = ["偵測已暫停。請按「開始」，倒數 5 秒後開始偵測。"]
+        cancelLiveSessionTimer()
+        sessionAudio.stopAll()
+        liveSessionState = .idle
+        quickPoseEngine.adviceLines = [
+            "偵測已暫停。請按「開始」：先準備 \(LiveTimedSessionConfig.prepareSeconds) 秒，再採樣 \(LiveTimedSessionConfig.analyzeSeconds) 秒。"
+        ]
         detectionSource = .liveCamera
         pickedItem = nil
     }
 
     @MainActor
     private func handleDetectionSourceChange() async {
-        guard !Self.sdkKeyIsPlaceholder else { return }
-        guard countdownSeconds == nil, !quickPoseEngine.isEngineStarting else { return }
+        guard !blocksDetectionForMissingSDKKey else { return }
+        guard countdownSeconds == nil, !liveSessionState.isBusy, !quickPoseEngine.isEngineStarting else { return }
         if isPaused {
             if !engineAttached { applyPausedIdleState() }
+            syncActivePoseRuntime()
             return
         }
-        guard engineAttached else { return }
+        guard engineAttached else {
+            syncActivePoseRuntime()
+            return
+        }
         if case .video = detectionSource {
             try? await Task.sleep(nanoseconds: 300_000_000)
         } else {
             try? await Task.sleep(nanoseconds: 200_000_000)
         }
-        attachQuickPoseEngine(resuming: true)
+        if usesNativeMediaPipe {
+            if case .video = detectionSource {
+                attachNativeMediaPipeVideoEngine(resuming: true)
+            } else {
+                syncActivePoseRuntime()
+                setDetectionActive(true)
+            }
+        } else {
+            attachQuickPoseEngine(resuming: true)
+        }
     }
 
     @MainActor
@@ -1617,26 +1872,35 @@ struct PoseDetectionView: View {
 
     private var cameraAndPoseContent: some View {
         GeometryReader { geometry in
-            let w = max(geometry.size.width, 1)
-            let h = max(geometry.size.height, 1)
-            let bottomPanelHeight = cameraBottomPanelHeight(for: h)
-            let safeBottom = geometry.safeAreaInsets.bottom
-
-            cameraPreviewStack(width: w, height: h)
-                .overlay(alignment: .top) {
-                    stepFlashOverlay(safeTop: geometry.safeAreaInsets.top)
-                }
-                .overlay(alignment: .top) {
-                    poseHUDOverlay(safeTop: geometry.safeAreaInsets.top)
-                }
-                .overlay(alignment: .bottom) {
-                    bottomChrome(height: bottomPanelHeight, safeBottom: safeBottom)
-                }
-                .overlay(alignment: .bottomTrailing) {
-                    quickPoseVersionLabel
-                        .padding(.bottom, isBottomPanelHidden ? 36 : 0)
-                }
+            cameraAndPoseLayout(in: geometry)
         }
+    }
+
+    private func cameraAndPoseLayout(in geometry: GeometryProxy) -> some View {
+        let w = max(geometry.size.width, 1)
+        let h = max(geometry.size.height, 1)
+        let bottomPanelHeight = cameraBottomPanelHeight(for: h)
+        let safeTop = geometry.safeAreaInsets.top
+        let safeBottom = geometry.safeAreaInsets.bottom
+
+        return cameraPreviewStack(width: w, height: h)
+            .overlay(alignment: .top) {
+                stepFlashOverlay(safeTop: safeTop)
+            }
+            .overlay(alignment: .top) {
+                poseHUDOverlay(safeTop: safeTop)
+            }
+            .overlay(alignment: .bottom) {
+                bottomChrome(height: bottomPanelHeight, safeBottom: safeBottom)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                versionLabelOverlay
+            }
+    }
+
+    private var versionLabelOverlay: some View {
+        quickPoseVersionLabel
+            .padding(.bottom, isBottomPanelHidden ? 36 : 0)
     }
 
     /// 底部選單；「隱藏」膠囊置中貼在選單頂邊（你標的白線位置），版面內不裁切。
@@ -1695,28 +1959,62 @@ struct PoseDetectionView: View {
 
     @ViewBuilder
     private func cameraPreviewStack(width w: CGFloat, height h: CGFloat) -> some View {
+        Group {
+            if usesNativeMediaPipe {
+                nativeMediaPipePreviewStack(width: w, height: h)
+            } else {
+                quickPosePreviewStack(width: w, height: h)
+            }
+        }
+        .id(cameraContentID + (usesNativeMediaPipe ? "-mp-native" : "-qp"))
+        .frame(width: w, height: h)
+        .onAppear {
+            wireQuickPoseEngineCallbacks()
+            wireMediaPipeEngineCallbacks()
+            syncActivePoseRuntime()
+        }
+    }
+
+    private func nativeMediaPipePreviewStack(width w: CGFloat, height h: CGFloat) -> some View {
+        ZStack(alignment: .top) {
+            nativeMediaPipeBackground(width: w, height: h)
+            MediaPipeSkeletonOverlay(
+                nodes: mediaPipeEngine.previewNodes,
+                flipHorizontally: skeletonFlipsHorizontally,
+                contentSize: mediaPipeEngine.frameContentSize,
+                videoGravity: .resizeAspectFill,
+                displayRect: mediaPipeEngine.previewDisplayRect
+            )
+            .frame(width: w, height: h)
+            .allowsHitTesting(false)
+        }
+    }
+
+    @ViewBuilder
+    private func nativeMediaPipeBackground(width w: CGFloat, height h: CGFloat) -> some View {
+        switch detectionSource {
+        case .liveCamera:
+            MediaPipeCameraPreview(engine: mediaPipeEngine)
+                .frame(width: w, height: h)
+                .clipped()
+                .onAppear { mediaPipeEngine.previewDisplayRect = .zero }
+        case .video:
+            MediaPipeVideoPreview(
+                player: mediaPipeEngine.videoPlayer,
+                videoRect: $mediaPipeEngine.previewDisplayRect
+            )
+            .frame(width: w, height: h)
+            .clipped()
+        }
+    }
+
+    private func quickPosePreviewStack(width w: CGFloat, height h: CGFloat) -> some View {
         ZStack(alignment: .top) {
             cameraSourceView(width: w, height: h)
-
             QuickPoseOverlayView(overlayImage: $quickPoseEngine.overlayImage, contentMode: .fill)
                 .frame(width: w, height: h)
                 .opacity(quickPoseEngine.overlayImage == nil ? 0 : 1)
                 .allowsHitTesting(false)
-
-            if assessmentEngine == .mediaPipe {
-                MediaPipeSkeletonOverlay(
-                    nodes: quickPoseEngine.previewNodes,
-                    flipHorizontally: skeletonFlipsHorizontally
-                )
-                .frame(width: w, height: h)
-                .allowsHitTesting(false)
-            }
-        }
-        .id(cameraContentID)
-        .frame(width: w, height: h)
-        .onAppear {
-            wireQuickPoseEngineCallbacks()
-            quickPoseEngine.restartLoop()
         }
     }
 
@@ -1732,9 +2030,13 @@ struct PoseDetectionView: View {
                 QuickPoseSimulatedCameraView(useFrontCamera: false, delegate: quickPoseEngine.pose, video: url)
                     .frame(width: w, height: h)
             } else {
-                QuickPoseCameraView(useFrontCamera: true, delegate: quickPoseEngine.pose, videoGravity: .resizeAspectFill)
-                    .frame(width: w, height: h)
-                    .clipped()
+                QuickPoseCameraView(
+                    useFrontCamera: useFrontCamera,
+                    delegate: quickPoseEngine.pose,
+                    videoGravity: .resizeAspectFill
+                )
+                .frame(width: w, height: h)
+                .clipped()
             }
         }
     }
@@ -1755,6 +2057,21 @@ struct PoseDetectionView: View {
         HStack(alignment: .top, spacing: 10) {
             poseStatusBadge
             Spacer(minLength: 8)
+            if case .liveCamera = detectionSource, !ProcessInfo.processInfo.isiOSAppOnMac {
+                Button {
+                    guard !liveSessionState.isBusy else { return }
+                    useFrontCamera.toggle()
+                } label: {
+                    Image(systemName: "camera.rotate.fill")
+                        .font(.body.weight(.bold))
+                        .foregroundStyle(.white)
+                        .padding(10)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(liveSessionState.isBusy)
+                .accessibilityLabel(useFrontCamera ? "切換為後鏡頭" : "切換為前鏡頭")
+            }
             // 右上角改為選單（影片仍可從下方「上傳影片偵測」選）。
             appMenuButton
         }
@@ -1766,61 +2083,59 @@ struct PoseDetectionView: View {
 
     private var poseStatusBadge: some View {
         VStack(alignment: .leading, spacing: 6) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(
-                    assessmentEngine == .trainedModel
-                        ? "\(assessmentEngine.hudBadgeTitle) · \(modeStore.skeletonModel.shortTitle)"
-                        : assessmentEngine.hudBadgeTitle
-                )
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(usesMediaPipeDataPlane ? .mint : .orange)
-                Text(modeStore.activity.coreTitle)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(modeStore.activity == .running ? .orange : .cyan)
-                if modeStore.isBackView {
-                    Text("拍攝視角 · 背面")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.mint)
-                } else if modeStore.isSideView {
-                    Text("拍攝視角 · 側面")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.orange)
-                }
-            }
-            Text(quickPoseEngine.fpsText)
-                .font(.system(size: 16, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white)
-            if !quickPoseEngine.statusHint.isEmpty {
-                Text(quickPoseEngine.statusHint)
-                    .font(.caption)
-                    .foregroundStyle(.yellow)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Text(quickPoseEngine.stepHUD)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.mint)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("資料庫節點：\(quickPoseEngine.dbNodeCount)")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.teal)
-            if usesMediaPipeDataPlane {
-                Text("寫入 \(MediaPipeRealm.fileName)")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.mint)
-            }
-            if quickPoseEngine.loopActive, quickPoseEngine.frameCallbackCount == 0 {
-                Text("等待第一幀…")
-                    .font(.caption2)
-                    .foregroundStyle(.yellow)
-            } else if quickPoseEngine.frameCallbackCount > 0 {
-                Text("引擎回呼 \(quickPoseEngine.frameCallbackCount) 次")
-                    .font(.caption2)
-                    .foregroundStyle(.green.opacity(0.85))
-            }
+            poseStatusBadgeHeader
+            poseStatusHintLine
+            poseStatusStepLine
             qualityBadgeIfNeeded
         }
+        .frame(width: 226, alignment: .leading)
         .padding(8)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var poseStatusBadgeHeader: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(activeHudBadgeTitle)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(usesMediaPipeDataPlane ? Color.mint : Color.orange)
+            Text(modeStore.activity.coreTitle)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(modeStore.activity == .running ? Color.orange : Color.cyan)
+            captureViewBadgeLine
+        }
+    }
+
+    @ViewBuilder
+    private var captureViewBadgeLine: some View {
+        if modeStore.isBackView {
+            Text("拍攝視角 · 背面")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(Color.mint)
+        } else if modeStore.isSideView {
+            Text("拍攝視角 · 側面")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(Color.orange)
+        }
+    }
+
+    @ViewBuilder
+    private var poseStatusHintLine: some View {
+        if !activeStatusHint.isEmpty {
+            Text(activeStatusHint)
+                .font(.caption)
+                .foregroundStyle(Color.yellow)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var poseStatusStepLine: some View {
+        Text(activeStepHUD)
+            .font(.caption2.weight(.semibold).monospacedDigit())
+            .foregroundStyle(Color.mint)
+            .lineLimit(1)
+            .minimumScaleFactor(0.75)
+            .frame(width: 210, height: 16, alignment: .leading)
     }
 
     @ViewBuilder
@@ -1840,13 +2155,14 @@ struct PoseDetectionView: View {
     private var quickPoseVersionLabel: some View {
         VStack(alignment: .trailing, spacing: 2) {
             if assessmentEngine == .mediaPipe {
-                Text("MediaPipe \(quickPoseEngine.pose.modelWeight())")
+                Text("MediaPipe Pose Landmarker")
                     .font(.caption2)
                     .foregroundStyle(.mint.opacity(0.9))
+            } else {
+                Text("QuickPose v\(quickPoseEngine.pose.quickPoseVersion())")
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.7))
             }
-            Text("QuickPose v\(quickPoseEngine.pose.quickPoseVersion())")
-                .font(.caption2)
-                .foregroundStyle(.white.opacity(0.7))
         }
         .padding(8)
     }
@@ -1857,11 +2173,12 @@ struct PoseDetectionView: View {
     private func bootstrapAuthorizedSession() {
         quickPoseEngine.statusHint = ""
 
-        if Self.sdkKeyIsPlaceholder {
+        if blocksDetectionForMissingSDKKey {
             quickPoseEngine.adviceLines = [
                 "相機已授權，但尚未設定有效的 QuickPoseSDKKey。",
                 "請在 Info.plist 將 QuickPoseSDKKey 改成你在 https://dev.quickpose.ai 申請的金鑰，",
-                "並確認 Bundle ID（此專案為 my-first-app.pose）已在後台綁定。"
+                "並確認 Bundle ID（此專案為 my-first-app.pose）已在後台綁定。",
+                "若只要用 MediaPipe，請切換到「MediaPipe」引擎（不需 QuickPose 金鑰）。"
             ]
             quickPoseEngine.statusHint = "請設定 SDK Key"
             engineAttached = false
@@ -1869,41 +2186,63 @@ struct PoseDetectionView: View {
         }
 
         applyPausedIdleState()
+        syncActivePoseRuntime()
     }
 
     @MainActor
     private func applyPausedIdleState() {
         guard isPaused, !engineAttached, !quickPoseEngine.isEngineStarting else { return }
-        guard countdownSeconds == nil else { return }
-        quickPoseEngine.fpsText = "FPS: —（已暫停）"
-        switch detectionSource {
-        case .liveCamera:
-            quickPoseEngine.adviceLines = [
-                "\(assessmentEngine.hudBadgeTitle) 已暫停。請按「開始」，倒數 5 秒後開始偵測。"
-            ] + modeStore.activity.corePrincipleLines
-        case .video:
-            quickPoseEngine.adviceLines = [
-                "影片已載入（\(assessmentEngine.hudBadgeTitle)）。請按「開始」，倒數 \(Self.videoCountdownSeconds) 秒後開始偵測。"
-            ] + modeStore.activity.corePrincipleLines
+        guard countdownSeconds == nil, !liveSessionState.isBusy else { return }
+        let idleLive = [
+            "\(activeHudBadgeTitle) 待機中。按「開始」後先準備 \(LiveTimedSessionConfig.prepareSeconds) 秒（不上傳數據），再自動採樣 \(LiveTimedSessionConfig.analyzeSeconds) 秒。"
+        ] + modeStore.activity.corePrincipleLines
+        let idleVideo = [
+            "影片已載入（\(activeHudBadgeTitle)）。請按「開始」，倒數 \(Self.videoCountdownSeconds) 秒後開始偵測。"
+        ] + modeStore.activity.corePrincipleLines
+        if usesNativeMediaPipe {
+            mediaPipeEngine.fpsText = "FPS: —（已暫停）"
+            mediaPipeEngine.adviceLines = {
+                switch detectionSource {
+                case .liveCamera: return idleLive
+                case .video: return idleVideo
+                }
+            }()
+            mediaPipeEngine.statusHint = ""
+        } else {
+            quickPoseEngine.fpsText = "FPS: —（已暫停）"
+            switch detectionSource {
+            case .liveCamera:
+                quickPoseEngine.adviceLines = idleLive
+            case .video:
+                quickPoseEngine.adviceLines = idleVideo
+            }
         }
     }
 
     @MainActor
     private func resumeDetectionFromUser() {
-        guard !Self.sdkKeyIsPlaceholder else { return }
-        guard countdownSeconds == nil else { return }
-        let isVideo: Bool
-        if case .video = detectionSource { isVideo = true } else { isVideo = false }
-        beginDetectionCountdown(isVideo: isVideo)
+        guard !blocksDetectionForMissingSDKKey else { return }
+        guard countdownSeconds == nil, !liveSessionState.isBusy else { return }
+        // 僅影片模式走短倒數；相機改用定時狀態機。
+        guard case .video = detectionSource else {
+            startLiveTimedSessionFromUser()
+            return
+        }
+        beginVideoDetectionCountdown()
     }
 
-    /// 倒數結束後 attach QuickPose；影片 2 秒、相機 5 秒。
+    /// 影片短倒數結束後 attach 對應 runtime（MediaPipe 原生或 QuickPose）。
     @MainActor
-    private func beginDetectionCountdown(isVideo: Bool) {
+    private func beginVideoDetectionCountdown() {
         cancelCountdown()
-        quickPoseEngine.adviceLines = ["準備開始偵測…"]
+        let preparing = ["準備開始偵測…"]
+        if usesNativeMediaPipe {
+            mediaPipeEngine.adviceLines = preparing
+        } else {
+            quickPoseEngine.adviceLines = preparing
+        }
         isPaused = true
-        let seconds = isVideo ? Self.videoCountdownSeconds : Self.cameraCountdownSeconds
+        let seconds = Self.videoCountdownSeconds
 
         countdownTask = Task {
             for sec in stride(from: seconds, through: 1, by: -1) {
@@ -1912,13 +2251,16 @@ struct PoseDetectionView: View {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
             guard !Task.isCancelled else { return }
-            let warmupNs: UInt64 = isVideo ? 300_000_000 : 200_000_000
-            try? await Task.sleep(nanoseconds: warmupNs)
+            try? await Task.sleep(nanoseconds: 300_000_000)
             await MainActor.run {
                 countdownSeconds = nil
                 countdownTask = nil
                 isPaused = false
-                attachQuickPoseEngine(resuming: engineAttached)
+                if usesNativeMediaPipe {
+                    attachNativeMediaPipeVideoEngine(resuming: engineAttached)
+                } else {
+                    attachQuickPoseEngine(resuming: engineAttached)
+                }
             }
         }
     }
@@ -1931,11 +2273,240 @@ struct PoseDetectionView: View {
     }
 
     @MainActor
-    private func pauseDetectionFromUser() {
+    private func cancelLiveSessionTimer() {
+        liveSessionTask?.cancel()
+        liveSessionTask = nil
+    }
+
+    /// 相機：清空緩衝 → 準備倒數 → 定時採樣 → 自動完成並顯示結果。
+    @MainActor
+    private func startLiveTimedSessionFromUser() {
+        guard !blocksDetectionForMissingSDKKey else { return }
+        guard case .liveCamera = detectionSource else { return }
+        guard !liveSessionState.isBusy, countdownSeconds == nil else { return }
+
+        cancelCountdown()
+        cancelLiveSessionTimer()
+        sessionAudio.stopAll()
+
+        // 進入 preparing 前徹底清空上一次暫存，避免污染。
+        clearLiveSessionBuffersForFreshStart()
+
+        isPaused = true
+        engineAttached = false
+        setDetectionActive(false)
+        syncActivePoseRuntime()
+        let prepareHint = [
+            "請上跑步機並調整至跑步速度。準備 \(LiveTimedSessionConfig.prepareSeconds) 秒後自動開始採樣。"
+        ]
+        if usesNativeMediaPipe {
+            mediaPipeEngine.fpsText = "FPS: 準備中…"
+            mediaPipeEngine.adviceLines = prepareHint
+            mediaPipeEngine.statusHint = "準備中，不收集姿勢數據"
+        } else {
+            quickPoseEngine.startLoopIfNeeded()
+            quickPoseEngine.fpsText = "FPS: 準備中…"
+            quickPoseEngine.adviceLines = prepareHint
+            quickPoseEngine.statusHint = "準備中，不收集姿勢數據"
+        }
+
+        let prepareTotal = LiveTimedSessionConfig.prepareSeconds
+        liveSessionState = .preparing(remaining: prepareTotal)
+        sessionAudio.announcePreparing(seconds: prepareTotal)
+
+        liveSessionTask = Task { @MainActor in
+            for sec in stride(from: prepareTotal, through: 1, by: -1) {
+                guard !Task.isCancelled else { return }
+                liveSessionState = .preparing(remaining: sec)
+                if sec <= 3 {
+                    sessionAudio.playTickBeep()
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+            guard !Task.isCancelled else { return }
+            enterLiveAnalyzingPhase()
+        }
+    }
+
+    /// 正式採樣：僅此階段將骨架餵給特徵／模型。
+    @MainActor
+    private func enterLiveAnalyzingPhase() {
+        // 再清一次，確保準備階段完全沒有殘留寫入。
+        analysisPipeline.reset()
+        resetStepUIState()
+        quickPoseEngine.clearAnalysisBuffers()
+        mediaPipeEngine.clearAnalysisBuffers()
+        predictionBuffer.reset()
+        livePrediction = nil
+        videoQualityResult = nil
+        cachedSessionFrames = []
+        historySavedForSession = false
+        lastSavedID = nil
+
+        isPaused = false
+        engineAttached = true
+        setDetectionActive(true)
+        if usesNativeMediaPipe {
+            mediaPipeEngine.fpsText = "FPS: 分析中…"
+            mediaPipeEngine.statusHint = "MediaPipe 分析中，請維持穩定跑姿"
+            mediaPipeEngine.adviceLines = ["開始分析：請維持穩定跑姿 \(LiveTimedSessionConfig.analyzeSeconds) 秒。"]
+        } else {
+            quickPoseEngine.isEngineStarting = false
+            // 準備階段已在預覽，勿 restart 造成黑屏空窗；只確保 loop 仍在跑。
+            quickPoseEngine.startLoopIfNeeded()
+            quickPoseEngine.fpsText = "FPS: 分析中…"
+            quickPoseEngine.statusHint = "分析中，請維持穩定跑姿"
+            quickPoseEngine.adviceLines = ["開始分析：請維持穩定跑姿 \(LiveTimedSessionConfig.analyzeSeconds) 秒。"]
+        }
+
+        finishDatabaseSession()
+        stopStreaming(preserveDisplayPrediction: true)
+        sessionIsMediaPipe = usesMediaPipeDataPlane
+        dbSessionID = nodeDatabase.beginSession(sourceLabel: currentSourceLabel)
+        startStreaming()
+
+        let analyzeTotal = LiveTimedSessionConfig.analyzeSeconds
+        liveSessionState = .analyzing(remaining: analyzeTotal)
+        sessionAudio.announceAnalyzing()
+
+        liveSessionTask = Task { @MainActor in
+            for sec in stride(from: analyzeTotal, through: 1, by: -1) {
+                guard !Task.isCancelled else { return }
+                liveSessionState = .analyzing(remaining: sec)
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+            guard !Task.isCancelled else { return }
+            completeLiveTimedSession()
+        }
+    }
+
+    /// 採樣時間到：立刻鎖定數據，聚合結果並顯示摘要。
+    @MainActor
+    private func completeLiveTimedSession() {
+        cancelLiveSessionTimer()
+
+        // 瞬間鎖定：之後的減速／下機畫面不得再寫入。
+        setDetectionActive(false)
+
+        let flushedNodes = usesNativeMediaPipe
+            ? mediaPipeEngine.flushStabilizedNodes()
+            : quickPoseEngine.flushStabilizedNodes()
+        if let flushed = flushedNodes, !flushed.isEmpty {
+            let ts = Date().timeIntervalSince1970
+            sessionDatabase.recordFrame(nodes: flushed)
+            if assessmentEngine.usesQualityPredict {
+                stream.enqueue(nodes: flushed, timestamp: ts)
+            }
+        }
+
+        let snap = stream.snapshotSessionFrames()
+        if !snap.isEmpty {
+            cachedSessionFrames = snap
+        }
+
+        let lockedLive = predictionBuffer.currentAggregate()?.asLivePrediction() ?? livePrediction
+
+        summaryLines = buildSummaryLinesForHistory(includeQuality: false)
+
+        finishDatabaseSession()
+        stopStreaming(preserveDisplayPrediction: true)
+
+        if let locked = lockedLive {
+            livePrediction = locked
+            videoQualityResult = locked
+        }
+
+        isPaused = true
+        engineAttached = false
+        liveSessionState = .completed
+        let doneLines = ["分析完成，可以減速了。正在產生報告…"]
+        if usesNativeMediaPipe {
+            mediaPipeEngine.fpsText = "FPS: —（採樣完成）"
+            mediaPipeEngine.statusHint = ""
+            mediaPipeEngine.adviceLines = doneLines
+        } else {
+            quickPoseEngine.fpsText = "FPS: —（採樣完成）"
+            quickPoseEngine.statusHint = ""
+            quickPoseEngine.adviceLines = doneLines
+        }
+
+        sessionAudio.announceCompleted()
+
+        runQualityAnalysisAfterCapture(fallback: lockedLive)
+    }
+
+    /// 準備／分析中取消：清空暫存並回 idle，不產生報告。
+    @MainActor
+    private func cancelLiveTimedSessionFromUser() {
+        guard liveSessionState.isBusy else { return }
+        cancelLiveSessionTimer()
+        sessionAudio.stopAll()
         cancelCountdown()
 
+        setDetectionActive(false)
+        finishDatabaseSession()
+        stopStreaming()
+        analysisPipeline.reset()
+        resetStepUIState()
+        quickPoseEngine.clearAnalysisBuffers()
+        mediaPipeEngine.clearAnalysisBuffers()
+        livePrediction = nil
+        videoQualityResult = nil
+        summaryLines = []
+        cachedSessionFrames = []
+        historySavedForSession = false
+        lastSavedID = nil
+
+        isPaused = true
+        engineAttached = false
+        liveSessionState = .idle
+        let cancelLines = [
+            "已取消並清空暫存數據。按「開始」可重新準備 \(LiveTimedSessionConfig.prepareSeconds) 秒後採樣。"
+        ] + modeStore.activity.corePrincipleLines
+        if usesNativeMediaPipe {
+            mediaPipeEngine.fpsText = "FPS: —（已取消）"
+            mediaPipeEngine.statusHint = ""
+            mediaPipeEngine.adviceLines = cancelLines
+        } else {
+            quickPoseEngine.fpsText = "FPS: —（已取消）"
+            quickPoseEngine.statusHint = ""
+            quickPoseEngine.adviceLines = cancelLines
+        }
+    }
+
+    /// 開始新 session 前清空骨架緩衝、步數與模型預測陣列。
+    @MainActor
+    private func clearLiveSessionBuffersForFreshStart() {
+        finishDatabaseSession()
+        stopStreaming()
+        analysisPipeline.reset()
+        resetStepUIState()
+        quickPoseEngine.clearAnalysisBuffers()
+        mediaPipeEngine.clearAnalysisBuffers()
+        predictionBuffer.reset()
+        livePrediction = nil
+        videoQualityResult = nil
+        summaryLines = []
+        cachedSessionFrames = []
+        historySavedForSession = false
+        lastSavedID = nil
+        quickPoseEngine.dbNodeCount = 0
+        mediaPipeEngine.dbNodeCount = 0
+    }
+
+    @MainActor
+    private func pauseDetectionFromUser() {
+        cancelCountdown()
+        // 相機定時流程用「取消」；此處僅服務影片模式暫停。
+        guard case .video = detectionSource else {
+            if liveSessionState.isBusy {
+                cancelLiveTimedSessionFromUser()
+            }
+            return
+        }
+
         // 影片模式：暫停即自動產生並顯示分析摘要（先截資料再 teardown）。
-        if case .video = detectionSource, engineAttached {
+        if engineAttached {
             // 先不要寫入即時預測信心度；等整段品質辨識完成後再統一寫入，避免卡片與條列不一致。
             if analysisPipeline.hasEvaluatedFrames {
                 summaryLines = buildSummaryLinesForHistory(includeQuality: false)
@@ -1943,25 +2514,61 @@ struct PoseDetectionView: View {
             let fallbackQuality = videoQualityResult ?? livePrediction
             pauseDetectionProcessing(fullReset: true, preserveAnalysis: true)
             isPaused = true
-            quickPoseEngine.fpsText = "FPS: —（已暫停）"
-            quickPoseEngine.adviceLines = ["偵測已暫停，正在產生分析摘要…"]
-            quickPoseEngine.statusHint = ""
+            let pausing = ["偵測已暫停，正在產生分析摘要…"]
+            if usesNativeMediaPipe {
+                mediaPipeEngine.fpsText = "FPS: —（已暫停）"
+                mediaPipeEngine.adviceLines = pausing
+                mediaPipeEngine.statusHint = ""
+            } else {
+                quickPoseEngine.fpsText = "FPS: —（已暫停）"
+                quickPoseEngine.adviceLines = pausing
+                quickPoseEngine.statusHint = ""
+            }
             runQualityAnalysisAfterCapture(fallback: fallbackQuality)
             return
         }
 
-        if engineAttached {
-            summaryLines = buildSummaryLinesForHistory()
-            autoSaveSummaryToHistory()
-        }
         pauseDetectionProcessing(fullReset: true)
         isPaused = true
-        quickPoseEngine.fpsText = "FPS: —（已暫停）"
-        quickPoseEngine.adviceLines = PauseAdvice.lines(for: modeStore.activity)
-        if historySavedForSession {
-            quickPoseEngine.adviceLines = ["偵測已暫停，摘要已存入歷史紀錄。"] + PauseAdvice.lines(for: modeStore.activity)
+        if usesNativeMediaPipe {
+            mediaPipeEngine.fpsText = "FPS: —（已暫停）"
+            mediaPipeEngine.adviceLines = PauseAdvice.lines(for: modeStore.activity)
+            mediaPipeEngine.statusHint = ""
+        } else {
+            quickPoseEngine.fpsText = "FPS: —（已暫停）"
+            quickPoseEngine.adviceLines = PauseAdvice.lines(for: modeStore.activity)
+            quickPoseEngine.statusHint = ""
         }
-        quickPoseEngine.statusHint = ""
+    }
+
+    @MainActor
+    private func attachNativeMediaPipeVideoEngine(resuming: Bool) {
+        wireMediaPipeEngineCallbacks()
+        syncAssessmentEngine()
+
+        isPaused = false
+        engineAttached = true
+        mediaPipeEngine.fpsText = "FPS: 偵測中…"
+        mediaPipeEngine.adviceLines = [resuming ? "正在恢復 MediaPipe 影片偵測…" : "正在啟動 MediaPipe 影片偵測…"]
+        mediaPipeEngine.statusHint = ""
+
+        finishDatabaseSession()
+        stopStreaming()
+        analysisPipeline.reset()
+        resetStepUIState()
+
+        historySavedForSession = false
+        lastSavedID = nil
+        mediaPipeEngine.dbNodeCount = 0
+        mediaPipeEngine.clearAnalysisBuffers()
+        cachedSessionFrames = []
+        sessionIsMediaPipe = true
+        dbSessionID = nodeDatabase.beginSession(sourceLabel: currentSourceLabel)
+        startStreaming()
+
+        syncActivePoseRuntime()
+        setDetectionActive(true)
+        isAwaitingVideoFirstFrame = true
     }
 
     @MainActor
@@ -2037,6 +2644,136 @@ struct PoseDetectionView: View {
                     .foregroundStyle(.white.opacity(0.9))
             }
         }
+        .allowsHitTesting(true)
+    }
+
+    /// 讀取／準備影片時的全螢幕等待，避免黑屏無回饋像當機。
+    @MainActor
+    private func videoWaitingOverlay(message: String) -> some View {
+        ZStack {
+            Color.black.opacity(0.72).ignoresSafeArea()
+            VStack(spacing: 20) {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(.white)
+                    .scaleEffect(1.4)
+                Text("請稍候")
+                    .font(.title2.weight(.bold))
+                    .foregroundStyle(.white)
+                Text(message)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 28)
+                Text("背景正在處理影片，畫面稍後會開始播放")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.6))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 28)
+            }
+            .padding(28)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
+            .padding(32)
+        }
+        .allowsHitTesting(true)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(message)
+    }
+
+    /// 準備階段：遠距離可視的特大倒數（固定 LiveTimedSessionConfig.prepareSeconds，不是舊的 5 秒）。
+    @MainActor
+    private func livePreparingOverlay(seconds: Int) -> some View {
+        ZStack {
+            Color.black.opacity(0.62).ignoresSafeArea()
+            VStack(spacing: 18) {
+                Text("準備倒數 \(LiveTimedSessionConfig.prepareSeconds) 秒")
+                    .font(.title2.weight(.bold))
+                    .foregroundStyle(.yellow)
+                Text("\(seconds)")
+                    .font(.system(size: 120, weight: .heavy, design: .rounded))
+                    .foregroundStyle(.white)
+                    .contentTransition(.numericText())
+                    .monospacedDigit()
+                Text("請上跑步機並調整至跑步速度")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+                Text("此階段不收集姿勢數據 · 倒數結束後才採樣 \(LiveTimedSessionConfig.analyzeSeconds) 秒")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+                Button {
+                    cancelLiveTimedSessionFromUser()
+                } label: {
+                    Label("取消 / 重設", systemImage: "xmark.circle.fill")
+                        .font(.headline.weight(.bold))
+                        .frame(maxWidth: 280)
+                        .padding(.vertical, 14)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .padding(.top, 12)
+            }
+        }
+        .allowsHitTesting(true)
+        .accessibilityElement(children: .contain)
+    }
+
+    /// 分析階段：頂部高對比進度＋剩餘秒數（骨架仍由底層繪製）。
+    @MainActor
+    private func liveAnalyzingBanner(remaining: Int) -> some View {
+        let total = Double(LiveTimedSessionConfig.analyzeSeconds)
+        let progress = total > 0 ? Double(LiveTimedSessionConfig.analyzeSeconds - remaining) / total : 0
+        return VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 14, height: 14)
+                        .shadow(color: .red.opacity(0.8), radius: 4)
+                    Text("分析中")
+                        .font(.title3.weight(.black))
+                        .foregroundStyle(.white)
+                }
+                Spacer(minLength: 8)
+                Text("剩餘 \(remaining) 秒")
+                    .font(.system(size: 28, weight: .heavy, design: .rounded))
+                    .foregroundStyle(.white)
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                Button {
+                    cancelLiveTimedSessionFromUser()
+                } label: {
+                    Text("取消")
+                        .font(.subheadline.weight(.bold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.red.opacity(0.9), in: Capsule())
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 56)
+            .padding(.bottom, 10)
+
+            ProgressView(value: min(max(progress, 0), 1))
+                .progressViewStyle(.linear)
+                .tint(.red)
+                .scaleEffect(x: 1, y: 2, anchor: .center)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
+        }
+        .frame(maxWidth: .infinity)
+        .background(
+            LinearGradient(
+                colors: [Color.black.opacity(0.78), Color.black.opacity(0.35), .clear],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
         .allowsHitTesting(true)
     }
 }
@@ -2542,7 +3279,7 @@ private struct PoseSessionDetailView: View {
                 Text("此次偵測")
             } footer: {
                 Text(database.kind == .mediaPipe
-                     ? "MediaPipe 節點存在本機 mediapipe.realm。標好／壞後可上傳雲端，或在資料庫按「匯出 JSON」，到 Mac 跑 python train.py --engine mediapipe --from-json 檔案.json。"
+                     ? "MediaPipe 節點由原生 Pose Landmarker 寫入 mediapipe.realm（不經 QuickPose）。請先清空舊資料再重新採樣；標好／壞後上傳或匯出 JSON，到 Mac 跑 python train.py --engine mediapipe。"
                      : "在此標記好 / 壞並上傳至雲端，或匯出 JSON 給 train.py --from-json。")
             }
 

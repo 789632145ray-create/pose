@@ -70,18 +70,132 @@ final class poseTests: XCTestCase {
         ))
     }
 
-    func testSwitchingEnginesKeepsSharedPoseRuntime() {
+    func testSwitchingEnginesPoseRuntimeRestartRules() {
         XCTAssertTrue(PoseAssessmentEngine.quickPose.usesFullPoseModel)
         XCTAssertTrue(PoseAssessmentEngine.mediaPipe.usesFullPoseModel)
         XCTAssertTrue(PoseAssessmentEngine.trainedModel.usesFullPoseModel)
-        for from in PoseAssessmentEngine.allCases {
-            for to in PoseAssessmentEngine.allCases where from != to {
-                XCTAssertFalse(
-                    PoseAssessmentEngine.requiresPoseRuntimeRestart(from: from, to: to),
-                    "\(from.rawValue) → \(to.rawValue) must keep the running overlay session"
+        // QuickPose ↔ 自訓（QuickPose 模型）仍共用 QuickPose overlay，不必重啟。
+        XCTAssertFalse(PoseAssessmentEngine.requiresPoseRuntimeRestart(from: .quickPose, to: .trainedModel))
+        XCTAssertFalse(PoseAssessmentEngine.requiresPoseRuntimeRestart(from: .trainedModel, to: .quickPose))
+        // 進出 MediaPipe 需切換原生 Landmarker ↔ QuickPose。
+        XCTAssertTrue(PoseAssessmentEngine.requiresPoseRuntimeRestart(from: .quickPose, to: .mediaPipe))
+        XCTAssertTrue(PoseAssessmentEngine.requiresPoseRuntimeRestart(from: .mediaPipe, to: .quickPose))
+        XCTAssertTrue(PoseAssessmentEngine.requiresPoseRuntimeRestart(from: .trainedModel, to: .mediaPipe))
+        XCTAssertTrue(PoseAssessmentEngine.requiresPoseRuntimeRestart(from: .mediaPipe, to: .trainedModel))
+        // 自訓選 MediaPipe 模型時與 MediaPipe 引擎同屬原生 runtime，不必重啟。
+        XCTAssertFalse(
+            PoseAssessmentEngine.requiresPoseRuntimeRestart(
+                from: .trainedModel,
+                to: .mediaPipe,
+                fromQuality: .mediaPipe,
+                toQuality: .mediaPipe
+            )
+        )
+        XCTAssertTrue(
+            PoseAssessmentEngine.requiresPoseRuntimeRestart(
+                from: .trainedModel,
+                to: .trainedModel,
+                fromQuality: .quickPose,
+                toQuality: .mediaPipe
+            )
+        )
+    }
+
+    func testTrainedQualityModelRoutesPredictAndRuntime() {
+        XCTAssertEqual(TrainedQualityModel.allCases.map(\.shortTitle), ["QuickPose", "MediaPipe"])
+        XCTAssertEqual(TrainedQualityModel.quickPose.predictPath, "/predict")
+        XCTAssertEqual(TrainedQualityModel.mediaPipe.predictPath, "/mediapipe/predict")
+        XCTAssertFalse(TrainedQualityModel.quickPose.usesNativeMediaPipe)
+        XCTAssertTrue(TrainedQualityModel.mediaPipe.usesNativeMediaPipe)
+
+        XCTAssertEqual(
+            PoseAssessmentEngine.trainedModel.predictPath(qualityModel: .quickPose),
+            "/predict"
+        )
+        XCTAssertEqual(
+            PoseAssessmentEngine.trainedModel.predictPath(qualityModel: .mediaPipe),
+            "/mediapipe/predict"
+        )
+        XCTAssertFalse(PoseAssessmentEngine.trainedModel.usesNativeMediaPipe(qualityModel: .quickPose))
+        XCTAssertTrue(PoseAssessmentEngine.trainedModel.usesNativeMediaPipe(qualityModel: .mediaPipe))
+        XCTAssertEqual(
+            PoseAssessmentEngine.trainedModel.hudBadgeTitle(qualityModel: .mediaPipe),
+            "自訓 · MediaPipe"
+        )
+        XCTAssertEqual(
+            PoseAssessmentEngine.trainedModel.hudBadgeTitle(qualityModel: .quickPose),
+            "自訓 · QuickPose"
+        )
+    }
+
+    func testMediaPipeSkeletonOverlayAspectFillMapping() {
+        let content = CGSize(width: 1080, height: 1920)
+        let view = CGSize(width: 390, height: 844)
+        let rect = MediaPipeSkeletonOverlay.fittedRect(
+            content: content,
+            in: view,
+            gravity: .resizeAspectFill
+        )
+        // aspectFill：以較大比例填滿，寬會超出並左右裁切。
+        XCTAssertGreaterThan(rect.width, view.width - 0.5)
+        XCTAssertEqual(rect.midX, view.width / 2, accuracy: 0.5)
+        XCTAssertEqual(rect.midY, view.height / 2, accuracy: 0.5)
+    }
+
+    func testPoseAdviceEvaluateNodesDetectsShoulderTilt() {
+        var samples: [MediaPipeLandmarkMapper.LandmarkSample] = []
+        for i in 0..<33 {
+            samples.append(
+                MediaPipeLandmarkMapper.LandmarkSample(
+                    x: 0.5, y: 0.5, z: 0, visibility: 0.9, presence: 0.9
                 )
-            }
+            )
         }
+        // left_shoulder=11, right_shoulder=12 — 製造明顯高低差
+        samples[11] = MediaPipeLandmarkMapper.LandmarkSample(
+            x: 0.4, y: 0.30, z: 0, visibility: 0.9, presence: 0.9
+        )
+        samples[12] = MediaPipeLandmarkMapper.LandmarkSample(
+            x: 0.6, y: 0.42, z: 0, visibility: 0.9, presence: 0.9
+        )
+        samples[23] = MediaPipeLandmarkMapper.LandmarkSample(
+            x: 0.4, y: 0.6, z: 0, visibility: 0.9, presence: 0.9
+        )
+        samples[24] = MediaPipeLandmarkMapper.LandmarkSample(
+            x: 0.6, y: 0.6, z: 0, visibility: 0.9, presence: 0.9
+        )
+        samples[0] = MediaPipeLandmarkMapper.LandmarkSample(
+            x: 0.5, y: 0.2, z: 0, visibility: 0.9, presence: 0.9
+        )
+        let advice = PoseAdvice.evaluate(nodes: MediaPipeLandmarkMapper.nodes(from: samples))
+        XCTAssertTrue(advice.issues.contains(.shoulderTilt), "\(advice.issues)")
+        XCTAssertFalse(advice.lines.isEmpty)
+    }
+
+    func testMediaPipeLandmarkMapperBuildsNodesAndSnapshot() {
+        var samples: [MediaPipeLandmarkMapper.LandmarkSample] = []
+        for i in 0..<33 {
+            samples.append(
+                MediaPipeLandmarkMapper.LandmarkSample(
+                    x: Double(i) / 100,
+                    y: Double(i) / 80,
+                    z: 0.01,
+                    visibility: 0.9,
+                    presence: 0.9
+                )
+            )
+        }
+        let nodes = MediaPipeLandmarkMapper.nodes(from: samples)
+        XCTAssertGreaterThanOrEqual(nodes.count, 33)
+        XCTAssertTrue(nodes.contains(where: { $0.joint == "nose" }))
+        XCTAssertTrue(nodes.contains(where: { $0.joint == "left_ankle" }))
+        XCTAssertTrue(nodes.contains(where: { $0.joint == "shoulder_mid" }))
+        XCTAssertTrue(nodes.contains(where: { $0.joint == "hip_mid" }))
+        let frame = MediaPipeLandmarkMapper.keypointFrame(from: nodes)
+        XCTAssertNotNil(frame.leftHip)
+        XCTAssertNotNil(frame.rightAnkle)
+        let snapshot = MediaPipeLandmarkMapper.walkingSnapshot(from: nodes)
+        XCTAssertGreaterThan(snapshot.leftShoulder.visibility, 0.5)
     }
 
     func testWalkingFormCorePrincipleLines() {

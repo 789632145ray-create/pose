@@ -67,6 +67,41 @@ class VideoResultAggregatorTests(unittest.TestCase):
         self.assertEqual(result.valid_samples_count, 0)
         self.assertEqual(result.final_confidence, 0.0)
 
+    def test_drops_ambiguous_mid_band(self):
+        preds = [
+            FramePrediction("good", 0.92),
+            FramePrediction("good", 0.88),
+            FramePrediction("good", 0.50),  # 模糊區間，應排除
+            FramePrediction("bad", 0.48),  # 模糊區間（且 < min_conf）
+            FramePrediction("bad", 0.70),
+        ]
+        agg = VideoResultAggregator(min_conf=0.5)
+        used = agg.clear_windows(preds)
+        confs = sorted(p.confidence for p in used)
+        self.assertNotIn(0.50, confs)
+        self.assertNotIn(0.48, confs)
+        result = agg.aggregate(preds)
+        self.assertEqual(result.final_label, "good")
+        # 勝出 good 的 top 60% → 兩筆都留下，topk 取 0.92
+        self.assertGreaterEqual(result.final_confidence, 0.85)
+
+    def test_all_ambiguous_falls_back_then_scores_top_frac(self):
+        preds = [
+            FramePrediction("good", 0.52),
+            FramePrediction("bad", 0.47),
+            FramePrediction("good", 0.49),
+            FramePrediction("bad", 0.51),
+            FramePrediction("good", 0.46),
+        ]
+        agg = VideoResultAggregator(min_conf=0.45, top_frac=0.6)
+        used = agg.clear_windows(preds)
+        # 全模糊 → 投票退回全部 5 筆
+        self.assertEqual(len(used), 5)
+        result = agg.aggregate(preds)
+        self.assertEqual(result.valid_samples_count, 5)
+        # 分數只取勝出類別前 60%
+        self.assertGreater(result.final_confidence, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

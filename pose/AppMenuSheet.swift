@@ -22,7 +22,6 @@ struct AppMenuSheet: View {
                 accountSection
                 actionsSection
                 engineSection
-                skeletonSection
                 signOutSection
             }
             .navigationTitle("選單")
@@ -49,6 +48,11 @@ struct AppMenuSheet: View {
 
     private var actionsSection: some View {
         Section {
+            NavigationLink {
+                UserGuideView()
+            } label: {
+                Label("使用說明", systemImage: "book.pages")
+            }
             Button(action: onHistory) {
                 Label("歷史紀錄", systemImage: "clock.arrow.circlepath")
             }
@@ -58,6 +62,7 @@ struct AppMenuSheet: View {
         }
     }
 
+    @ViewBuilder
     private var engineSection: some View {
         Section {
             ForEach(PoseAssessmentEngine.allCases) { engine in
@@ -68,31 +73,36 @@ struct AppMenuSheet: View {
         } header: {
             Text("偵測引擎（3 種）")
         } footer: {
-            Text("QuickPose 為官方 overlay；MediaPipe 為 BlazePose Full 骨架；自訓模型會連雲端辨識。")
+            Text("QuickPose 為官方 overlay；MediaPipe 以原生 Landmarker 採樣；自訓模型可再選 QuickPose／MediaPipe 兩套已訓練品質模型做辨識。")
         }
-    }
 
-    private var skeletonSection: some View {
-        Section {
-            ForEach(PoseSkeletonModel.allCases) { model in
-                Button {
-                    modeStore.skeletonModel = model
-                } label: {
-                    HStack {
-                        Text(model.title)
-                        Spacer()
-                        if modeStore.skeletonModel == model {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(Color.accentColor)
+        if modeStore.engine == .trainedModel {
+            Section {
+                ForEach(TrainedQualityModel.allCases) { model in
+                    Button {
+                        modeStore.trainedQualityModel = model
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(model.title)
+                                Text(model.detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if modeStore.trainedQualityModel == model {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(Color.accentColor)
+                            }
                         }
                     }
+                    .foregroundStyle(.primary)
                 }
-                .foregroundStyle(.primary)
+            } header: {
+                Text("自訓辨識模型")
+            } footer: {
+                Text("請選與訓練資料相同來源的模型：QuickPose 採樣對 QuickPose 模型；MediaPipe 原生採樣對 MediaPipe 模型。")
             }
-        } header: {
-            Text("自訓模型：骨架／品質模型")
-        } footer: {
-            Text("只在「自訓模型」時使用。QuickPose 模型 → pose.realm + /predict；MediaPipe 模型 → mediapipe.realm + /mediapipe/predict。切換不會刪除既有節點資料。")
         }
     }
 
