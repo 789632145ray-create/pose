@@ -2,206 +2,183 @@
 //  UserGuideSheet.swift
 //  pose
 //
-//  App 內使用說明：相機定時採樣、影片分析、視角與資料庫操作。
+//  App 內使用說明：逐步「下一步」導覽（註冊後首次、或選單隨時開啟）。
 //
 
 import SwiftUI
 
+private struct UserGuideStep: Identifiable, Equatable {
+    let id: Int
+    let systemImage: String
+    let title: String
+    let detail: String
+}
+
+private enum UserGuideContent {
+    static let steps: [UserGuideStep] = [
+        UserGuideStep(
+            id: 0,
+            systemImage: "hand.wave.fill",
+            title: "歡迎使用 Pose 偵測",
+            detail: "接下來用幾個步驟說明如何偵測走路／跑步姿勢。新會員註冊後會自動顯示一次；之後也可從右上角選單再開啟。"
+        ),
+        UserGuideStep(
+            id: 1,
+            systemImage: "camera.fill",
+            title: "先允許相機並選好設定",
+            detail: "首次請允許使用相機。底部可選偵測引擎、走路／跑步，以及拍攝視角（正面／側面／背面）。自訓模型還可再選骨架模型。"
+        ),
+        UserGuideStep(
+            id: 2,
+            systemImage: "figure.run",
+            title: "相機：準備 \(LiveTimedSessionConfig.prepareSeconds) 秒＋採樣 \(LiveTimedSessionConfig.analyzeSeconds) 秒",
+            detail: "按「開始」後先進入準備倒數（不收集數據），方便走上跑步機並加速；倒數結束自動開始正式採樣。結束後會立刻停止收集並顯示摘要，之後減速下機不會寫入結果。"
+        ),
+        UserGuideStep(
+            id: 3,
+            systemImage: "speaker.wave.2.fill",
+            title: "聽提示音，不必盯螢幕",
+            detail: "準備開始、最後 3 秒滴答、開始分析、分析完成都會有語音或提示音。準備或分析中可按「取消」清空暫存並回待機。"
+        ),
+        UserGuideStep(
+            id: 4,
+            systemImage: "camera.rotate",
+            title: "前後鏡頭與拍攝視角",
+            detail: "右上角或底部可切換前／後鏡頭；跑步機側面／背面建議用後鏡頭。背面模式只給左右對稱相關建議，不會亂給前傾／跨步等前後向建議。"
+        ),
+        UserGuideStep(
+            id: 5,
+            systemImage: "film.fill",
+            title: "也可以上傳影片分析",
+            detail: "點「上傳影片偵測」或「檔案」匯入。讀取時會顯示請稍候。確認後短暫倒數開始偵測，可暫停或按品質辨識與摘要查看結果。"
+        ),
+        UserGuideStep(
+            id: 6,
+            systemImage: "checklist",
+            title: "看摘要、歷史與資料庫",
+            detail: "分析結束會顯示建議（打勾＝達標、警告＝需注意）。選單可看歷史紀錄；底部可開資料庫標好／壞或匯出。清空前都會再確認一次。"
+        ),
+        UserGuideStep(
+            id: 7,
+            systemImage: "lightbulb.fill",
+            title: "跑步機建議流程",
+            detail: "架好後鏡頭 → 選背面或側面 → 按開始 → 準備期上機加速 → 聽到「開始分析」後維持穩定跑姿 → 聽到完成再減速下機。準備／分析中請勿切換引擎、視角或鏡頭。"
+        ),
+    ]
+}
+
 struct UserGuideView: View {
+    var onFinished: (() -> Void)? = nil
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var pageIndex = 0
+
+    private var steps: [UserGuideStep] { UserGuideContent.steps }
+    private var isFirst: Bool { pageIndex <= 0 }
+    private var isLast: Bool { pageIndex >= steps.count - 1 }
+
     var body: some View {
-        List {
-            sectionQuickStart
-            sectionCameraTimed
-            sectionVideo
-            sectionViewModes
-            sectionEngines
-            sectionResults
-            sectionTips
+        VStack(spacing: 0) {
+            progressHeader
+            TabView(selection: $pageIndex) {
+                ForEach(steps) { item in
+                    stepPage(item)
+                        .tag(item.id)
+                        .padding(.horizontal, 24)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            .animation(.easeInOut(duration: 0.25), value: pageIndex)
+
+            bottomBar
         }
+        .background(Color(uiColor: .systemBackground))
         .navigationTitle("使用說明")
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    private var sectionQuickStart: some View {
-        Section {
-            guideRow(
-                "1. 登入帳號",
-                "使用已註冊帳號登入。自訓模型品質辨識需要有效登入。新會員註冊並完成個人資料後，會自動顯示本說明一次。"
-            )
-            guideRow(
-                "2. 允許相機",
-                "首次使用請點「允許使用相機」。若曾拒絕，請到系統設定開啟權限。"
-            )
-            guideRow(
-                "3. 選好設定再開始",
-                "底部可選：偵測引擎、活動（走路／跑步）、拍攝視角（正面／側面／背面）。自訓模型還可選骨架模型。"
-            )
-        } header: {
-            Text("快速開始")
-        }
-    }
-
-    private var sectionCameraTimed: some View {
-        Section {
-            guideRow(
-                "開始＝準備 \(LiveTimedSessionConfig.prepareSeconds) 秒＋採樣 \(LiveTimedSessionConfig.analyzeSeconds) 秒",
-                "相機模式按「開始」後會先進入準備倒數（不上傳姿勢數據），方便走上跑步機並加速；倒數結束自動進入正式採樣。"
-            )
-            guideRow(
-                "聽覺提示",
-                "準備開始、最後 3 秒滴答、開始分析、分析完成都會有語音或提示音，方便你看著前方跑步機而不必盯螢幕。"
-            )
-            guideRow(
-                "採樣結束自動出報告",
-                "採樣時間一到會立刻停止收集數據，並顯示分析摘要。之後減速、下機的畫面不會再寫入結果。"
-            )
-            guideRow(
-                "取消／重設",
-                "準備或分析中可按「取消」，會清空本次暫存並回到待機，不產生報告。"
-            )
-            guideRow(
-                "前後鏡頭",
-                "右上角旋轉圖示或底部「目前：前／後鏡頭」可切換。跑步機側面／背面建議用後鏡頭。切換請在待機時進行。"
-            )
-        } header: {
-            Text("相機即時偵測（跑步機）")
-        } footer: {
-            Text("準備階段只預覽骨架，不會寫入資料庫；只有「分析中」才會收集節點與統計。")
-        }
-    }
-
-    private var sectionVideo: some View {
-        Section {
-            guideRow(
-                "上傳影片",
-                "點「上傳影片偵測」從相簿選，或「檔案」從檔案 App 匯入。讀取較大影片時會顯示「請稍候」。"
-            )
-            guideRow(
-                "確認後開始",
-                "確認影片後會短暫倒數再開始偵測。可按「暫停」產生品質辨識與摘要；也可按「品質辨識與摘要」手動開啟。"
-            )
-            guideRow(
-                "切回相機",
-                "影片模式可隨時切回相機繼續使用定時採樣流程。"
-            )
-        } header: {
-            Text("影片分析")
-        } footer: {
-            Text("影片在手機本機做骨架分析；若使用自訓／MediaPipe 品質模型，才會連伺服器做好／壞辨識。")
-        }
-    }
-
-    private var sectionViewModes: some View {
-        Section {
-            guideRow(
-                "正面",
-                "一般正面拍攝，使用完整走路／跑步姿勢建議。"
-            )
-            guideRow(
-                "側面",
-                "適合觀察前傾、膝角、跨步過度等前後向特徵。請讓全身側面入鏡。"
-            )
-            guideRow(
-                "背面",
-                "適合觀察骨盆左右傾斜、軀幹側傾、肩膀高低差。背面模式不會給前傾／跨步／著地等前後向建議（背面無法可靠量測）。"
-            )
-        } header: {
-            Text("拍攝視角")
-        } footer: {
-            Text("請依實際鏡頭位置選擇視角，選錯會讓建議不準。")
-        }
-    }
-
-    private var sectionEngines: some View {
-        Section {
-            guideRow(
-                "QuickPose",
-                "官方 overlay 骨架，適合快速預覽與規則建議。"
-            )
-            guideRow(
-                "MediaPipe",
-                "BlazePose Full 骨架，可做品質辨識；節點寫入 mediapipe.realm。"
-            )
-            guideRow(
-                "自訓模型",
-                "連雲端模型辨識好／壞。可再選 QuickPose 或 MediaPipe 骨架／品質路徑。需登入且伺服器可用。"
-            )
-            guideRow(
-                "活動：走路／跑步",
-                "會套用不同正確姿勢核心與建議邏輯，請依實際運動選擇。"
-            )
-        } header: {
-            Text("偵測引擎與活動")
-        }
-    }
-
-    private var sectionResults: some View {
-        Section {
-            guideRow(
-                "分析摘要",
-                "結束後會顯示建議列表與（若有）模型品質。左側圖示：打勾＝達標、警告＝需注意、資訊＝一般說明。"
-            )
-            guideRow(
-                "歷史紀錄",
-                "選單 → 歷史紀錄可查看過去摘要。清空前會再確認一次。"
-            )
-            guideRow(
-                "資料庫",
-                "底部可開啟節點資料庫，查看本次／歷史 session，並可標好／壞或匯出 JSON（訓練用）。清空前會再確認。"
-            )
-            guideRow(
-                "左上角狀態",
-                "顯示目前引擎、活動、視角、步數與品質結果。鏡頭切換請用右上角或底部按鈕。"
-            )
-        } header: {
-            Text("結果與資料")
-        }
-    }
-
-    private var sectionTips: some View {
-        Section {
-            guideRow(
-                "光線與入鏡",
-                "全身入鏡、光線充足、背景單純，關節信心較穩。"
-            )
-            guideRow(
-                "跑步機建議流程",
-                "架好後鏡頭 → 選背面或側面 → 按開始 → 在準備倒數內走上機並加速 → 聽到開始分析後維持穩定跑姿 → 聽到完成後再減速下機。"
-            )
-            guideRow(
-                "不要中途亂切設定",
-                "準備／分析中請勿切換引擎、視角或鏡頭，以免資料不一致。需要重來請按取消。"
-            )
-        } header: {
-            Text("拍攝小技巧")
-        }
-    }
-
-    private func guideRow(_ title: String, _ detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-            Text(detail)
-                .font(.footnote)
+    private var progressHeader: some View {
+        VStack(spacing: 10) {
+            Text("步驟 \(pageIndex + 1)／\(steps.count)")
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            ProgressView(value: Double(pageIndex + 1), total: Double(steps.count))
+                .tint(.accentColor)
+                .padding(.horizontal, 24)
         }
-        .padding(.vertical, 4)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
+    }
+
+    private func stepPage(_ item: UserGuideStep) -> some View {
+        VStack(spacing: 20) {
+            Spacer(minLength: 12)
+            Image(systemName: item.systemImage)
+                .font(.system(size: 52, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 96, height: 96)
+                .background(Color.accentColor.opacity(0.12), in: Circle())
+            Text(item.title)
+                .font(.title2.weight(.bold))
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(item.detail)
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 12)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var bottomBar: some View {
+        HStack(spacing: 12) {
+            if !isFirst {
+                Button("上一步") {
+                    withAnimation { pageIndex = max(0, pageIndex - 1) }
+                }
+                .buttonStyle(.bordered)
+                .frame(maxWidth: .infinity)
+            }
+
+            Button {
+                if isLast {
+                    if let onFinished {
+                        onFinished()
+                    } else {
+                        dismiss()
+                    }
+                } else {
+                    withAnimation { pageIndex = min(steps.count - 1, pageIndex + 1) }
+                }
+            } label: {
+                Text(isLast ? "開始使用" : "下一步")
+                    .font(.headline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 16)
+        .background(.bar)
     }
 }
 
-/// 獨立 Sheet（若從其他入口直接 present 時使用）。
+/// 獨立 Sheet（註冊後首次、或外部 present）。
 struct UserGuideSheet: View {
     let onClose: () -> Void
 
     var body: some View {
         NavigationStack {
-            UserGuideView()
+            UserGuideView(onFinished: onClose)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button("完成", action: onClose)
+                        Button("略過", action: onClose)
                     }
                 }
         }
+        .interactiveDismissDisabled(false)
     }
 }
