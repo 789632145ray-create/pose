@@ -74,7 +74,7 @@ final class poseTests: XCTestCase {
         XCTAssertTrue(PoseAssessmentEngine.quickPose.usesFullPoseModel)
         XCTAssertTrue(PoseAssessmentEngine.mediaPipe.usesFullPoseModel)
         XCTAssertTrue(PoseAssessmentEngine.trainedModel.usesFullPoseModel)
-        // QuickPose ↔ 自訓仍共用 QuickPose overlay，不必重啟。
+        // QuickPose ↔ 自訓（QuickPose 模型）仍共用 QuickPose overlay，不必重啟。
         XCTAssertFalse(PoseAssessmentEngine.requiresPoseRuntimeRestart(from: .quickPose, to: .trainedModel))
         XCTAssertFalse(PoseAssessmentEngine.requiresPoseRuntimeRestart(from: .trainedModel, to: .quickPose))
         // 進出 MediaPipe 需切換原生 Landmarker ↔ QuickPose。
@@ -82,6 +82,50 @@ final class poseTests: XCTestCase {
         XCTAssertTrue(PoseAssessmentEngine.requiresPoseRuntimeRestart(from: .mediaPipe, to: .quickPose))
         XCTAssertTrue(PoseAssessmentEngine.requiresPoseRuntimeRestart(from: .trainedModel, to: .mediaPipe))
         XCTAssertTrue(PoseAssessmentEngine.requiresPoseRuntimeRestart(from: .mediaPipe, to: .trainedModel))
+        // 自訓選 MediaPipe 模型時與 MediaPipe 引擎同屬原生 runtime，不必重啟。
+        XCTAssertFalse(
+            PoseAssessmentEngine.requiresPoseRuntimeRestart(
+                from: .trainedModel,
+                to: .mediaPipe,
+                fromQuality: .mediaPipe,
+                toQuality: .mediaPipe
+            )
+        )
+        XCTAssertTrue(
+            PoseAssessmentEngine.requiresPoseRuntimeRestart(
+                from: .trainedModel,
+                to: .trainedModel,
+                fromQuality: .quickPose,
+                toQuality: .mediaPipe
+            )
+        )
+    }
+
+    func testTrainedQualityModelRoutesPredictAndRuntime() {
+        XCTAssertEqual(TrainedQualityModel.allCases.map(\.shortTitle), ["QuickPose", "MediaPipe"])
+        XCTAssertEqual(TrainedQualityModel.quickPose.predictPath, "/predict")
+        XCTAssertEqual(TrainedQualityModel.mediaPipe.predictPath, "/mediapipe/predict")
+        XCTAssertFalse(TrainedQualityModel.quickPose.usesNativeMediaPipe)
+        XCTAssertTrue(TrainedQualityModel.mediaPipe.usesNativeMediaPipe)
+
+        XCTAssertEqual(
+            PoseAssessmentEngine.trainedModel.predictPath(qualityModel: .quickPose),
+            "/predict"
+        )
+        XCTAssertEqual(
+            PoseAssessmentEngine.trainedModel.predictPath(qualityModel: .mediaPipe),
+            "/mediapipe/predict"
+        )
+        XCTAssertFalse(PoseAssessmentEngine.trainedModel.usesNativeMediaPipe(qualityModel: .quickPose))
+        XCTAssertTrue(PoseAssessmentEngine.trainedModel.usesNativeMediaPipe(qualityModel: .mediaPipe))
+        XCTAssertEqual(
+            PoseAssessmentEngine.trainedModel.hudBadgeTitle(qualityModel: .mediaPipe),
+            "自訓 · MediaPipe"
+        )
+        XCTAssertEqual(
+            PoseAssessmentEngine.trainedModel.hudBadgeTitle(qualityModel: .quickPose),
+            "自訓 · QuickPose"
+        )
     }
 
     func testMediaPipeSkeletonOverlayAspectFillMapping() {

@@ -62,6 +62,7 @@ struct AppMenuSheet: View {
         }
     }
 
+    @ViewBuilder
     private var engineSection: some View {
         Section {
             ForEach(PoseAssessmentEngine.allCases) { engine in
@@ -72,7 +73,36 @@ struct AppMenuSheet: View {
         } header: {
             Text("偵測引擎（3 種）")
         } footer: {
-            Text("QuickPose 為官方 overlay；MediaPipe 以 Google Pose Landmarker 原生抓關節（相機／影片）並寫入 mediapipe.realm；自訓模型走 pose.realm 雲端辨識。")
+            Text("QuickPose 為官方 overlay；MediaPipe 以原生 Landmarker 採樣；自訓模型可再選 QuickPose／MediaPipe 兩套已訓練品質模型做辨識。")
+        }
+
+        if modeStore.engine == .trainedModel {
+            Section {
+                ForEach(TrainedQualityModel.allCases) { model in
+                    Button {
+                        modeStore.trainedQualityModel = model
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(model.title)
+                                Text(model.detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if modeStore.trainedQualityModel == model {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                        }
+                    }
+                    .foregroundStyle(.primary)
+                }
+            } header: {
+                Text("自訓辨識模型")
+            } footer: {
+                Text("請選與訓練資料相同來源的模型：QuickPose 採樣對 QuickPose 模型；MediaPipe 原生採樣對 MediaPipe 模型。")
+            }
         }
     }
 

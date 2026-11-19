@@ -351,9 +351,9 @@ struct PoseDetectionView: View {
     /// 步態分析管線（影格處理由 quickPoseEngine 讀取此參考）。
     @State private var analysisPipeline = PoseAnalysisPipeline()
 
-    /// MediaPipe 引擎：相機／影片都走原生 Landmarker（不經 QuickPose）。
+    /// MediaPipe 引擎，或自訓選 MediaPipe 品質模型：相機／影片都走原生 Landmarker。
     private var usesNativeMediaPipe: Bool {
-        assessmentEngine == .mediaPipe
+        assessmentEngine.usesNativeMediaPipe(qualityModel: modeStore.trainedQualityModel)
     }
 
     private var activeAdviceLines: [String] {
@@ -471,17 +471,21 @@ struct PoseDetectionView: View {
         modeStore.engine
     }
 
-    /// 僅「MediaPipe」引擎走 mediapipe.realm + /mediapipe/predict（原生 Landmarker 蒐集）。
+    /// MediaPipe 引擎或自訓 MediaPipe 模型：mediapipe.realm + /mediapipe/predict。
     private var usesMediaPipeDataPlane: Bool {
-        assessmentEngine == .mediaPipe
+        usesNativeMediaPipe
     }
 
     private var activePredictPath: String {
-        usesMediaPipeDataPlane ? "/mediapipe/predict" : assessmentEngine.predictPath
+        assessmentEngine.predictPath(qualityModel: modeStore.trainedQualityModel)
     }
 
     private var activePredictEngineName: String {
-        usesMediaPipeDataPlane ? "mediapipe" : assessmentEngine.predictEngineName
+        assessmentEngine.predictEngineName(qualityModel: modeStore.trainedQualityModel)
+    }
+
+    private var activeHudBadgeTitle: String {
+        assessmentEngine.hudBadgeTitle(qualityModel: modeStore.trainedQualityModel)
     }
 
     /// 相機／影片來源切換時強制 remount，確保 onAppear → start 生命週期與原生模式一致。
@@ -660,6 +664,9 @@ struct PoseDetectionView: View {
             .onAppear(perform: handleDetectionViewAppear)
             .onChange(of: modeStore.engine) { _, newEngine in
                 handleAssessmentEngineChange(newEngine)
+            }
+            .onChange(of: modeStore.trainedQualityModel) { oldModel, newModel in
+                handleTrainedQualityModelChange(from: oldModel, to: newModel)
             }
             .onChange(of: modeStore.activity) { _, _ in
                 syncActivityMode()
@@ -1217,6 +1224,7 @@ struct PoseDetectionView: View {
     @MainActor
     private func handleAssessmentEngineChange(_ newEngine: PoseAssessmentEngine) {
         let previous = quickPoseEngine.assessmentEngine
+        let quality = modeStore.trainedQualityModel
         syncAssessmentEngine()
         guard previous != newEngine else { return }
         livePrediction = nil
@@ -1231,13 +1239,48 @@ struct PoseDetectionView: View {
             mediaPipeEngine.dbNodeCount = 0
             startStreaming()
         }
-        if previous == .mediaPipe || newEngine == .mediaPipe {
-            quickPoseEngine.statusHint = "已切換\(newEngine.title)"
-            mediaPipeEngine.statusHint = "已切換\(newEngine.title)"
+        let needsNativeSwitch = PoseAssessmentEngine.requiresPoseRuntimeRestart(
+            from: previous,
+            to: newEngine,
+            fromQuality: quality,
+            toQuality: quality
+        )
+        if needsNativeSwitch {
+            quickPoseEngine.statusHint = "已切換\(newEngine.hudBadgeTitle(qualityModel: quality))"
+            mediaPipeEngine.statusHint = "已切換\(newEngine.hudBadgeTitle(qualityModel: quality))"
         } else if PoseAssessmentEngine.requiresPoseRuntimeRestart(from: previous, to: newEngine) {
             quickPoseEngine.scheduleRestart(hint: "正在切換\(newEngine.title)骨架…")
         } else {
             quickPoseEngine.statusHint = "已切換\(newEngine.title)，骨架持續顯示"
+        }
+    }
+
+    @MainActor
+    private func handleTrainedQualityModelChange(from oldModel: TrainedQualityModel, to newModel: TrainedQualityModel) {
+        guard assessmentEngine == .trainedModel, oldModel != newModel else {
+            syncAssessmentEngine()
+            return
+        }
+        livePrediction = nil
+        videoQualityResult = nil
+        finishDatabaseSession()
+        stopStreaming()
+        syncAssessmentEngine()
+        syncActivePoseRuntime()
+        if engineAttached, (quickPoseEngine.detectionActive || mediaPipeEngine.detectionActive) {
+            sessionIsMediaPipe = usesMediaPipeDataPlane
+            dbSessionID = nodeDatabase.beginSession(sourceLabel: currentSourceLabel)
+            quickPoseEngine.dbNodeCount = 0
+            mediaPipeEngine.dbNodeCount = 0
+            startStreaming()
+        }
+        let badge = assessmentEngine.hudBadgeTitle(qualityModel: newModel)
+        if oldModel.usesNativeMediaPipe != newModel.usesNativeMediaPipe {
+            quickPoseEngine.statusHint = "已切換\(badge)"
+            mediaPipeEngine.statusHint = "已切換\(badge)"
+        } else {
+            quickPoseEngine.statusHint = "已切換辨識模型：\(newModel.shortTitle)"
+            mediaPipeEngine.statusHint = "已切換辨識模型：\(newModel.shortTitle)"
         }
     }
 
@@ -2052,7 +2095,7 @@ struct PoseDetectionView: View {
 
     private var poseStatusBadgeHeader: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(assessmentEngine.hudBadgeTitle)
+            Text(activeHudBadgeTitle)
                 .font(.caption.weight(.bold))
                 .foregroundStyle(usesMediaPipeDataPlane ? Color.mint : Color.orange)
             Text(modeStore.activity.coreTitle)
@@ -2151,10 +2194,10 @@ struct PoseDetectionView: View {
         guard isPaused, !engineAttached, !quickPoseEngine.isEngineStarting else { return }
         guard countdownSeconds == nil, !liveSessionState.isBusy else { return }
         let idleLive = [
-            "\(assessmentEngine.hudBadgeTitle) 待機中。按「開始」後先準備 \(LiveTimedSessionConfig.prepareSeconds) 秒（不上傳數據），再自動採樣 \(LiveTimedSessionConfig.analyzeSeconds) 秒。"
+            "\(activeHudBadgeTitle) 待機中。按「開始」後先準備 \(LiveTimedSessionConfig.prepareSeconds) 秒（不上傳數據），再自動採樣 \(LiveTimedSessionConfig.analyzeSeconds) 秒。"
         ] + modeStore.activity.corePrincipleLines
         let idleVideo = [
-            "影片已載入（\(assessmentEngine.hudBadgeTitle)）。請按「開始」，倒數 \(Self.videoCountdownSeconds) 秒後開始偵測。"
+            "影片已載入（\(activeHudBadgeTitle)）。請按「開始」，倒數 \(Self.videoCountdownSeconds) 秒後開始偵測。"
         ] + modeStore.activity.corePrincipleLines
         if usesNativeMediaPipe {
             mediaPipeEngine.fpsText = "FPS: —（已暫停）"
