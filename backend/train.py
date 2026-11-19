@@ -10,7 +10,7 @@
      - 關節座標取 mean／std；生物力學角度取 mean／std／min／max
   3. 以與推論相同的 window_size／stride 切時間窗，擴增樣本並對齊分布。
   4. GroupShuffleSplit（依 session id）避免同影片洩漏到測試集。
-  5. 僅對訓練集做水平翻轉增強；RandomForest 訓練後印出訓練／測試報告。
+  5. 僅對訓練集做水平翻轉增強；GradientBoosting + 機率校準後印出訓練／測試報告與正確樣本平均信心度。
 
 使用：
   python train.py                         # → pose_quality_model.joblib
@@ -33,7 +33,8 @@ import joblib
 import numpy as np
 from mongo_util import describe_mongo_url_problem, make_mongo_client, mongo_url_help
 from pymongo.errors import ConfigurationError
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.model_selection import GroupShuffleSplit
 
@@ -585,6 +586,24 @@ def csv_output_path(engine: str) -> str:
     return MEDIAPIPE_CSV_PATH if engine == "mediapipe" else CSV_PATH
 
 
+def _mean_confidence_on_correct(model, X_test: np.ndarray, y_test: np.ndarray) -> float | None:
+    """測試集中「預測正確」樣本的平均 predict_proba 信心（該預測類別的機率）。"""
+    if len(X_test) == 0:
+        return None
+    pred = model.predict(X_test)
+    proba = model.predict_proba(X_test)
+    classes = list(model.classes_)
+    confs: list[float] = []
+    for i, label in enumerate(pred):
+        if label != y_test[i]:
+            continue
+        idx = classes.index(label)
+        confs.append(float(proba[i, idx]))
+    if not confs:
+        return None
+    return float(np.mean(confs))
+
+
 def _collect_window_frames_by_group(
     docs: list[dict],
     groups_train: np.ndarray,
@@ -723,13 +742,21 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001 — 增強失敗不阻斷訓練
         print(f"水平翻轉增強略過：{exc}")
 
-    model = RandomForestClassifier(
-        n_estimators=300,
-        max_depth=10,
-        min_samples_leaf=2,
-        class_weight="balanced",
+    base = GradientBoostingClassifier(
+        n_estimators=150,
+        learning_rate=0.05,
+        max_depth=4,
         random_state=42,
     )
+    min_class_train = min(int((y_train == 1).sum()), int((y_train == 0).sum()))
+    if min_class_train >= 3:
+        cv_folds = min(3, min_class_train)
+        model = CalibratedClassifierCV(base, method="sigmoid", cv=cv_folds)
+        classifier_name = f"CalibratedClassifierCV(GradientBoosting, sigmoid, cv={cv_folds})"
+    else:
+        model = base
+        classifier_name = "GradientBoostingClassifier"
+    print(f"訓練模型：{classifier_name}")
     model.fit(X_train, y_train)
 
     pred_train = model.predict(X_train)
@@ -740,6 +767,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"測試集準確率：{accuracy_score(y_test, pred_test):.3f}")
     print("測試集分類報告：")
     print(classification_report(y_test, pred_test, target_names=["bad", "good"], zero_division=0))
+
+    mean_correct_conf = _mean_confidence_on_correct(model, X_test, y_test)
+    if mean_correct_conf is None:
+        print("測試集預測正確樣本的平均信心度：無（沒有預測正確的樣本）")
+    else:
+        print(
+            f"測試集預測正確樣本的平均信心度：{mean_correct_conf:.3f}"
+            f"（目標 ≥ 0.85；{'達標' if mean_correct_conf >= 0.85 else '未達標，可再補資料或調參'}）"
+        )
 
     joblib.dump(
         {
@@ -752,6 +788,8 @@ def main(argv: list[str] | None = None) -> int:
             "window_size": window_size,
             "window_stride": stride,
             "n_features": len(FEATURE_COLUMNS),
+            "classifier": classifier_name,
+            "mean_correct_confidence": mean_correct_conf,
         },
         out_model,
     )
