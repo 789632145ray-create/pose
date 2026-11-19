@@ -104,12 +104,18 @@ struct PoseDetectionShellView: View {
     @StateObject private var modeStore = DetectionModeStore()
     @AppStorage("didShowEngineChooser") private var didShowEngineChooser = false
     @State private var showEngineChooser = false
+    @State private var showUserGuide = false
 
     var body: some View {
         Group {
             PoseDetectionView()
         }
         .environmentObject(modeStore)
+        .sheet(isPresented: $showUserGuide, onDismiss: handleUserGuideDismissed) {
+            UserGuideSheet {
+                showUserGuide = false
+            }
+        }
         .sheet(isPresented: $showEngineChooser) {
             EngineChooserSheet(modeStore: modeStore) {
                 didShowEngineChooser = true
@@ -117,7 +123,29 @@ struct PoseDetectionShellView: View {
             }
         }
         .onAppear {
-            if !didShowEngineChooser {
+            presentFirstRunSheetsIfNeeded()
+        }
+        .onChange(of: auth.username) { _, _ in
+            presentFirstRunSheetsIfNeeded()
+        }
+    }
+
+    /// 新註冊會員先看使用說明；看完（或無需顯示）再跳出引擎選擇。
+    private func presentFirstRunSheetsIfNeeded() {
+        guard !showUserGuide, !showEngineChooser else { return }
+        if auth.shouldPresentUserGuide {
+            showUserGuide = true
+            return
+        }
+        if !didShowEngineChooser {
+            showEngineChooser = true
+        }
+    }
+
+    private func handleUserGuideDismissed() {
+        auth.markUserGuideSeen()
+        if !didShowEngineChooser {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                 showEngineChooser = true
             }
         }
