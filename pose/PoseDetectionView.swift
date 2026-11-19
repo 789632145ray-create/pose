@@ -580,50 +580,84 @@ struct PoseDetectionView: View {
 
     private var contentWithOverlays: some View {
         contentWithLifecycle
-            .overlay {
-                if let pending = pendingVideo {
-                    pendingConfirmOverlay(pending)
-                }
-            }
-            .overlay {
-                // 影片短倒數（舊流程）。
-                if let sec = countdownSeconds, !liveSessionState.isBusy {
-                    countdownOverlay(seconds: sec)
-                }
-            }
-            .overlay {
-                if case .preparing(let sec) = liveSessionState {
-                    livePreparingOverlay(seconds: sec)
-                }
-            }
-            .overlay(alignment: .top) {
-                if case .analyzing(let sec) = liveSessionState {
-                    liveAnalyzingBanner(remaining: sec)
-                }
-            }
-            .overlay {
-                if isLoadingVideo || isAwaitingVideoFirstFrame {
-                    videoWaitingOverlay(
-                        message: isLoadingVideo
-                            ? "正在讀取影片，請稍候…"
-                            : "正在準備影片畫面…"
-                    )
-                }
-            }
+            .overlay { pendingVideoOverlay }
+            .overlay { videoCountdownOverlay }
+            .overlay { liveSessionPreparingOverlay }
+            .overlay(alignment: .top) { liveSessionAnalyzingOverlay }
+            .overlay { videoLoadingOverlay }
+    }
+
+    @ViewBuilder
+    private var pendingVideoOverlay: some View {
+        if let pending = pendingVideo {
+            pendingConfirmOverlay(pending)
+        }
+    }
+
+    @ViewBuilder
+    private var videoCountdownOverlay: some View {
+        if let sec = countdownSeconds, !liveSessionState.isBusy {
+            countdownOverlay(seconds: sec)
+        }
+    }
+
+    @ViewBuilder
+    private var liveSessionPreparingOverlay: some View {
+        if case .preparing(let sec) = liveSessionState {
+            livePreparingOverlay(seconds: sec)
+        }
+    }
+
+    @ViewBuilder
+    private var liveSessionAnalyzingOverlay: some View {
+        if case .analyzing(let sec) = liveSessionState {
+            liveAnalyzingBanner(remaining: sec)
+        }
+    }
+
+    @ViewBuilder
+    private var videoLoadingOverlay: some View {
+        if isLoadingVideo || isAwaitingVideoFirstFrame {
+            videoWaitingOverlay(
+                message: isLoadingVideo ? "正在讀取影片，請稍候…" : "正在準備影片畫面…"
+            )
+        }
     }
 
     private var contentWithLifecycle: some View {
-        rootZStack
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .ignoresSafeArea()
-            .onAppear {
-                refreshCameraGate()
-                syncAssessmentEngine()
-                syncActivityMode()
-                syncCaptureViewMode()
-                wireQuickPoseEngineCallbacks()
-                syncBodyGaitProfile()
+        contentWithMediaImport
+            .onDisappear(perform: handleDetectionViewDisappear)
+    }
+
+    private var contentWithMediaImport: some View {
+        contentWithModeObservers
+            .onChange(of: pickedItem) { _, newItem in
+                Task { await handlePickedItem(newItem) }
             }
+            .photosPicker(isPresented: $showPhotosPicker, selection: $pickedItem, matching: .videos)
+            .fileImporter(
+                isPresented: $showFileImporter,
+                allowedContentTypes: [.movie, .mpeg4Movie, .quickTimeMovie, .avi],
+                allowsMultipleSelection: false,
+                onCompletion: handleImportedFile
+            )
+            .alert("影片載入失敗", isPresented: videoLoadErrorPresented) {
+                Button("好") { videoLoadError = nil }
+            } message: {
+                Text(videoLoadError ?? "")
+            }
+    }
+
+    private var videoLoadErrorPresented: Binding<Bool> {
+        Binding(
+            get: { videoLoadError != nil },
+            set: { if !$0 { videoLoadError = nil } }
+        )
+    }
+
+    private var contentWithModeObservers: some View {
+        contentWithPreviewObservers
+            .onAppear(perform: handleDetectionViewAppear)
             .onChange(of: modeStore.engine) { _, newEngine in
                 handleAssessmentEngineChange(newEngine)
             }
@@ -642,6 +676,10 @@ struct PoseDetectionView: View {
             .onChange(of: auth.userProfile) { _, _ in
                 syncBodyGaitProfile()
             }
+    }
+
+    private var contentWithPreviewObservers: some View {
+        contentRoot
             .onChange(of: quickPoseEngine.overlayImage) { _, newImage in
                 if isAwaitingVideoFirstFrame, newImage != nil {
                     isAwaitingVideoFirstFrame = false
@@ -664,7 +702,6 @@ struct PoseDetectionView: View {
             }
             .task(id: isAwaitingVideoFirstFrame) {
                 guard isAwaitingVideoFirstFrame else { return }
-                // 最長等待 20 秒，避免永遠蓋住畫面。
                 try? await Task.sleep(nanoseconds: 20_000_000_000)
                 if isAwaitingVideoFirstFrame {
                     isAwaitingVideoFirstFrame = false
@@ -677,40 +714,39 @@ struct PoseDetectionView: View {
             .task(id: detectionSource) {
                 await handleDetectionSourceChange()
             }
-            .onChange(of: pickedItem) { _, newItem in
-                Task { await handlePickedItem(newItem) }
-            }
-            .photosPicker(isPresented: $showPhotosPicker, selection: $pickedItem, matching: .videos)
-            .fileImporter(
-                isPresented: $showFileImporter,
-                allowedContentTypes: [.movie, .mpeg4Movie, .quickTimeMovie, .avi],
-                allowsMultipleSelection: false
-            ) { result in
-                handleImportedFile(result)
-            }
-            .alert("影片載入失敗", isPresented: Binding(
-                get: { videoLoadError != nil },
-                set: { if !$0 { videoLoadError = nil } }
-            )) {
-                Button("好") { videoLoadError = nil }
-            } message: {
-                Text(videoLoadError ?? "")
-            }
-            .onDisappear {
-                cancelCountdown()
-                cancelLiveSessionTimer()
-                sessionAudio.stopAll()
-                liveSessionState = .idle
-                setDetectionActive(false)
-                mediaPipeEngine.shutdown()
-                quickPoseEngine.stopLoop()
-                finishDatabaseSession()
-                stopStreaming()
-                engineAttached = false
-                quickPoseEngine.resetSessionUI()
-                mediaPipeEngine.clearAnalysisBuffers()
-                analysisPipeline.reset()
-            }
+    }
+
+    private var contentRoot: some View {
+        rootZStack
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .ignoresSafeArea()
+    }
+
+    @MainActor
+    private func handleDetectionViewAppear() {
+        refreshCameraGate()
+        syncAssessmentEngine()
+        syncActivityMode()
+        syncCaptureViewMode()
+        wireQuickPoseEngineCallbacks()
+        syncBodyGaitProfile()
+    }
+
+    @MainActor
+    private func handleDetectionViewDisappear() {
+        cancelCountdown()
+        cancelLiveSessionTimer()
+        sessionAudio.stopAll()
+        liveSessionState = .idle
+        setDetectionActive(false)
+        mediaPipeEngine.shutdown()
+        quickPoseEngine.stopLoop()
+        finishDatabaseSession()
+        stopStreaming()
+        engineAttached = false
+        quickPoseEngine.resetSessionUI()
+        mediaPipeEngine.clearAnalysisBuffers()
+        analysisPipeline.reset()
     }
 
     @ViewBuilder
@@ -808,16 +844,23 @@ struct PoseDetectionView: View {
 
     @MainActor
     private var stepEventList: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(quickPoseEngine.recentSteps.suffix(5).reversed()) { event in
-                let interval = event.intervalFromPrevious.map { String(format: "+%.2fs", $0) } ?? "—"
-                let bpm = event.cadenceBPM.map { String(format: "%.0f bpm", $0) } ?? "—"
-                let color: Color = event.side == .left ? .cyan : .pink
-                Text("第 \(event.index) 步  \(event.side.localizedLabel)腳   \(interval)   \(bpm)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(color)
+        let events = usesNativeMediaPipe
+            ? mediaPipeEngine.recentSteps
+            : quickPoseEngine.recentSteps
+        return VStack(alignment: .leading, spacing: 4) {
+            ForEach(events.suffix(5).reversed()) { event in
+                stepEventRow(event)
             }
         }
+    }
+
+    private func stepEventRow(_ event: StepEvent) -> some View {
+        let interval = event.intervalFromPrevious.map { String(format: "+%.2fs", $0) } ?? "—"
+        let bpm = event.cadenceBPM.map { String(format: "%.0f bpm", $0) } ?? "—"
+        let color: Color = event.side == .left ? .cyan : .pink
+        return Text("第 \(event.index) 步  \(event.side.localizedLabel)腳   \(interval)   \(bpm)")
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(color)
     }
 
     /// 底部固定高度區塊；內容可垂直滑動，避免選項變多後資料庫／選影片被裁切。
@@ -1786,26 +1829,35 @@ struct PoseDetectionView: View {
 
     private var cameraAndPoseContent: some View {
         GeometryReader { geometry in
-            let w = max(geometry.size.width, 1)
-            let h = max(geometry.size.height, 1)
-            let bottomPanelHeight = cameraBottomPanelHeight(for: h)
-            let safeBottom = geometry.safeAreaInsets.bottom
-
-            cameraPreviewStack(width: w, height: h)
-                .overlay(alignment: .top) {
-                    stepFlashOverlay(safeTop: geometry.safeAreaInsets.top)
-                }
-                .overlay(alignment: .top) {
-                    poseHUDOverlay(safeTop: geometry.safeAreaInsets.top)
-                }
-                .overlay(alignment: .bottom) {
-                    bottomChrome(height: bottomPanelHeight, safeBottom: safeBottom)
-                }
-                .overlay(alignment: .bottomTrailing) {
-                    quickPoseVersionLabel
-                        .padding(.bottom, isBottomPanelHidden ? 36 : 0)
-                }
+            cameraAndPoseLayout(in: geometry)
         }
+    }
+
+    private func cameraAndPoseLayout(in geometry: GeometryProxy) -> some View {
+        let w = max(geometry.size.width, 1)
+        let h = max(geometry.size.height, 1)
+        let bottomPanelHeight = cameraBottomPanelHeight(for: h)
+        let safeTop = geometry.safeAreaInsets.top
+        let safeBottom = geometry.safeAreaInsets.bottom
+
+        return cameraPreviewStack(width: w, height: h)
+            .overlay(alignment: .top) {
+                stepFlashOverlay(safeTop: safeTop)
+            }
+            .overlay(alignment: .top) {
+                poseHUDOverlay(safeTop: safeTop)
+            }
+            .overlay(alignment: .bottom) {
+                bottomChrome(height: bottomPanelHeight, safeBottom: safeBottom)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                versionLabelOverlay
+            }
+    }
+
+    private var versionLabelOverlay: some View {
+        quickPoseVersionLabel
+            .padding(.bottom, isBottomPanelHidden ? 36 : 0)
     }
 
     /// 底部選單；「隱藏」膠囊置中貼在選單頂邊（你標的白線位置），版面內不裁切。
@@ -1864,30 +1916,11 @@ struct PoseDetectionView: View {
 
     @ViewBuilder
     private func cameraPreviewStack(width w: CGFloat, height h: CGFloat) -> some View {
-        ZStack(alignment: .top) {
+        Group {
             if usesNativeMediaPipe {
-                switch detectionSource {
-                case .liveCamera:
-                    MediaPipeCameraPreview(engine: mediaPipeEngine)
-                        .frame(width: w, height: h)
-                        .clipped()
-                case .video:
-                    MediaPipeVideoPreview(player: mediaPipeEngine.videoPlayer)
-                        .frame(width: w, height: h)
-                        .clipped()
-                }
-                MediaPipeSkeletonOverlay(
-                    nodes: mediaPipeEngine.previewNodes,
-                    flipHorizontally: skeletonFlipsHorizontally
-                )
-                .frame(width: w, height: h)
-                .allowsHitTesting(false)
+                nativeMediaPipePreviewStack(width: w, height: h)
             } else {
-                cameraSourceView(width: w, height: h)
-                QuickPoseOverlayView(overlayImage: $quickPoseEngine.overlayImage, contentMode: .fill)
-                    .frame(width: w, height: h)
-                    .opacity(quickPoseEngine.overlayImage == nil ? 0 : 1)
-                    .allowsHitTesting(false)
+                quickPosePreviewStack(width: w, height: h)
             }
         }
         .id(cameraContentID + (usesNativeMediaPipe ? "-mp-native" : "-qp"))
@@ -1896,6 +1929,42 @@ struct PoseDetectionView: View {
             wireQuickPoseEngineCallbacks()
             wireMediaPipeEngineCallbacks()
             syncActivePoseRuntime()
+        }
+    }
+
+    private func nativeMediaPipePreviewStack(width w: CGFloat, height h: CGFloat) -> some View {
+        ZStack(alignment: .top) {
+            nativeMediaPipeBackground(width: w, height: h)
+            MediaPipeSkeletonOverlay(
+                nodes: mediaPipeEngine.previewNodes,
+                flipHorizontally: skeletonFlipsHorizontally
+            )
+            .frame(width: w, height: h)
+            .allowsHitTesting(false)
+        }
+    }
+
+    @ViewBuilder
+    private func nativeMediaPipeBackground(width w: CGFloat, height h: CGFloat) -> some View {
+        switch detectionSource {
+        case .liveCamera:
+            MediaPipeCameraPreview(engine: mediaPipeEngine)
+                .frame(width: w, height: h)
+                .clipped()
+        case .video:
+            MediaPipeVideoPreview(player: mediaPipeEngine.videoPlayer)
+                .frame(width: w, height: h)
+                .clipped()
+        }
+    }
+
+    private func quickPosePreviewStack(width w: CGFloat, height h: CGFloat) -> some View {
+        ZStack(alignment: .top) {
+            cameraSourceView(width: w, height: h)
+            QuickPoseOverlayView(overlayImage: $quickPoseEngine.overlayImage, contentMode: .fill)
+                .frame(width: w, height: h)
+                .opacity(quickPoseEngine.overlayImage == nil ? 0 : 1)
+                .allowsHitTesting(false)
         }
     }
 
@@ -1964,42 +2033,59 @@ struct PoseDetectionView: View {
 
     private var poseStatusBadge: some View {
         VStack(alignment: .leading, spacing: 6) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(assessmentEngine.hudBadgeTitle)
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(usesMediaPipeDataPlane ? .mint : .orange)
-                Text(modeStore.activity.coreTitle)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(modeStore.activity == .running ? .orange : .cyan)
-                if modeStore.isBackView {
-                    Text("拍攝視角 · 背面")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.mint)
-                } else if modeStore.isSideView {
-                    Text("拍攝視角 · 側面")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.orange)
-                }
-            }
-            if !activeStatusHint.isEmpty {
-                Text(activeStatusHint)
-                    .font(.caption)
-                    .foregroundStyle(.yellow)
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            // 固定寬高，避免步數變大時左上角區塊一直伸縮。
-            Text(activeStepHUD)
-                .font(.caption2.weight(.semibold).monospacedDigit())
-                .foregroundStyle(.mint)
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-                .frame(width: 210, height: 16, alignment: .leading)
+            poseStatusBadgeHeader
+            poseStatusHintLine
+            poseStatusStepLine
             qualityBadgeIfNeeded
         }
         .frame(width: 226, alignment: .leading)
         .padding(8)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var poseStatusBadgeHeader: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(assessmentEngine.hudBadgeTitle)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(usesMediaPipeDataPlane ? Color.mint : Color.orange)
+            Text(modeStore.activity.coreTitle)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(modeStore.activity == .running ? Color.orange : Color.cyan)
+            captureViewBadgeLine
+        }
+    }
+
+    @ViewBuilder
+    private var captureViewBadgeLine: some View {
+        if modeStore.isBackView {
+            Text("拍攝視角 · 背面")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(Color.mint)
+        } else if modeStore.isSideView {
+            Text("拍攝視角 · 側面")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(Color.orange)
+        }
+    }
+
+    @ViewBuilder
+    private var poseStatusHintLine: some View {
+        if !activeStatusHint.isEmpty {
+            Text(activeStatusHint)
+                .font(.caption)
+                .foregroundStyle(Color.yellow)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var poseStatusStepLine: some View {
+        Text(activeStepHUD)
+            .font(.caption2.weight(.semibold).monospacedDigit())
+            .foregroundStyle(Color.mint)
+            .lineLimit(1)
+            .minimumScaleFactor(0.75)
+            .frame(width: 210, height: 16, alignment: .leading)
     }
 
     @ViewBuilder
