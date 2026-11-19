@@ -416,6 +416,8 @@ struct PoseDetectionView: View {
     @State private var liveSessionState: LiveSessionState = .idle
     @State private var liveSessionTask: Task<Void, Never>?
     @State private var sessionAudio = SessionAudioCues()
+    /// 實時相機前後鏡頭（跑步機側面／背面建議用後鏡頭）。
+    @AppStorage("poseUseFrontCamera") private var useFrontCamera = false
     @State private var engineAttached = false
     @State private var stepFlashSide: PoseFootSide?
     @State private var stepFlashOpacity: Double = 0
@@ -504,16 +506,18 @@ struct PoseDetectionView: View {
     /// 相機／影片來源切換時強制 remount，確保 onAppear → start 生命週期與原生模式一致。
     private var cameraContentID: String {
         switch detectionSource {
-        case .liveCamera: return "live-camera"
-        case .video(let url): return "video-\(url.absoluteString)"
+        case .liveCamera:
+            return "live-camera-\(useFrontCamera ? "front" : "back")"
+        case .video(let url):
+            return "video-\(url.absoluteString)"
         }
     }
 
-    /// 前鏡頭預覽是鏡像，節點 x 要翻轉才會對上身體。
+    /// 前鏡頭預覽是鏡像，節點 x 要翻轉才會對上身體；後鏡頭不翻。
     private var skeletonFlipsHorizontally: Bool {
         switch detectionSource {
         case .liveCamera:
-            return !ProcessInfo.processInfo.isiOSAppOnMac
+            return useFrontCamera && !ProcessInfo.processInfo.isiOSAppOnMac
         case .video:
             return false
         }
@@ -903,6 +907,21 @@ struct PoseDetectionView: View {
                 .tint(.red)
                 .disabled(!liveSessionState.isBusy || Self.sdkKeyIsPlaceholder)
             }
+            Button {
+                guard !liveSessionState.isBusy else { return }
+                useFrontCamera.toggle()
+            } label: {
+                Label(
+                    useFrontCamera ? "目前：前鏡頭（點擊切換後鏡頭）" : "目前：後鏡頭（點擊切換前鏡頭）",
+                    systemImage: "camera.rotate"
+                )
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+            }
+            .buttonStyle(.bordered)
+            .tint(.cyan)
+            .disabled(liveSessionState.isBusy || ProcessInfo.processInfo.isiOSAppOnMac)
             videoImportButtons(primaryLabel: "上傳影片偵測")
 
         case .video:
@@ -1325,22 +1344,32 @@ struct PoseDetectionView: View {
     }
 
     /// 開始一段即時串流（開後端 session + 啟動每 0.5 秒批次上傳與每秒預測的迴圈）。
+    /// 相機與影片共用 `/predict`；若 `/sessions` 開不起來，仍退回本機視窗預測（與影片模式一致），不再整段中止成「未連線」。
     @MainActor
     private func startStreaming() {
         livePrediction = nil
         predictionBuffer.reset()
         guard assessmentEngine.usesQualityPredict else { return }
         let source = currentSourceLabel
-        let uploadLiveFrames = assessmentEngine.usesTrainedModelPredict
+        let preferUpload = assessmentEngine.usesTrainedModelPredict
         stream.predictPath = activePredictPath
         stream.predictEngine = activePredictEngineName
         streamLoopTask?.cancel()
         streamLoopTask = Task {
-            if uploadLiveFrames {
+            var uploadLiveFrames = preferUpload
+            if preferUpload {
                 let ok = await stream.begin(mode: .predict, sourceLabel: source)
-                guard ok else {
-                    await MainActor.run { livePrediction = LivePrediction(label: nil, probabilityGood: 0, note: "未連線/未登入") }
-                    return
+                if !ok {
+                    // 憑證／伺服器仍可能可打 /predict（影片模式就是這條路）。
+                    stream.preparePredictWindow()
+                    uploadLiveFrames = false
+                    await MainActor.run {
+                        livePrediction = LivePrediction(
+                            label: nil,
+                            probabilityGood: 0,
+                            note: "雲端 session 未開，改用本機預測"
+                        )
+                    }
                 }
             } else {
                 stream.preparePredictWindow()
@@ -1772,9 +1801,13 @@ struct PoseDetectionView: View {
                 QuickPoseSimulatedCameraView(useFrontCamera: false, delegate: quickPoseEngine.pose, video: url)
                     .frame(width: w, height: h)
             } else {
-                QuickPoseCameraView(useFrontCamera: true, delegate: quickPoseEngine.pose, videoGravity: .resizeAspectFill)
-                    .frame(width: w, height: h)
-                    .clipped()
+                QuickPoseCameraView(
+                    useFrontCamera: useFrontCamera,
+                    delegate: quickPoseEngine.pose,
+                    videoGravity: .resizeAspectFill
+                )
+                .frame(width: w, height: h)
+                .clipped()
             }
         }
     }
@@ -1795,6 +1828,21 @@ struct PoseDetectionView: View {
         HStack(alignment: .top, spacing: 10) {
             poseStatusBadge
             Spacer(minLength: 8)
+            if case .liveCamera = detectionSource, !ProcessInfo.processInfo.isiOSAppOnMac {
+                Button {
+                    guard !liveSessionState.isBusy else { return }
+                    useFrontCamera.toggle()
+                } label: {
+                    Image(systemName: "camera.rotate.fill")
+                        .font(.body.weight(.bold))
+                        .foregroundStyle(.white)
+                        .padding(10)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(liveSessionState.isBusy)
+                .accessibilityLabel(useFrontCamera ? "切換為後鏡頭" : "切換為前鏡頭")
+            }
             // 右上角改為選單（影片仍可從下方「上傳影片偵測」選）。
             appMenuButton
         }
@@ -1825,6 +1873,11 @@ struct PoseDetectionView: View {
                     Text("拍攝視角 · 側面")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.orange)
+                }
+                if case .liveCamera = detectionSource, !ProcessInfo.processInfo.isiOSAppOnMac {
+                    Text(useFrontCamera ? "鏡頭 · 前" : "鏡頭 · 後")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.cyan)
                 }
             }
             Text(quickPoseEngine.fpsText)
@@ -2269,13 +2322,13 @@ struct PoseDetectionView: View {
         .allowsHitTesting(true)
     }
 
-    /// 準備階段：遠距離可視的特大倒數。
+    /// 準備階段：遠距離可視的特大倒數（固定 LiveTimedSessionConfig.prepareSeconds，不是舊的 5 秒）。
     @MainActor
     private func livePreparingOverlay(seconds: Int) -> some View {
         ZStack {
             Color.black.opacity(0.62).ignoresSafeArea()
             VStack(spacing: 18) {
-                Text("準備中")
+                Text("準備倒數 \(LiveTimedSessionConfig.prepareSeconds) 秒")
                     .font(.title2.weight(.bold))
                     .foregroundStyle(.yellow)
                 Text("\(seconds)")
@@ -2288,9 +2341,11 @@ struct PoseDetectionView: View {
                     .foregroundStyle(.white)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 24)
-                Text("此階段不收集姿勢數據")
+                Text("此階段不收集姿勢數據 · 倒數結束後才採樣 \(LiveTimedSessionConfig.analyzeSeconds) 秒")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.white.opacity(0.75))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
                 Button {
                     cancelLiveTimedSessionFromUser()
                 } label: {
