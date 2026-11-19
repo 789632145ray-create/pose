@@ -2041,6 +2041,88 @@ struct PoseDetectionView: View {
     }
 }
 
+// MARK: - 摘要列圖示（達成／需改善／中性資訊）
+
+private enum SummaryLineTone {
+    case positive
+    case warning
+    case neutral
+
+    var systemImage: String {
+        switch self {
+        case .positive: return "checkmark.circle.fill"
+        case .warning: return "exclamationmark.triangle.fill"
+        case .neutral: return "info.circle.fill"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .positive: return .green
+        case .warning: return .orange
+        case .neutral: return .secondary
+        }
+    }
+
+    /// 依文案判斷：只有明確「達標／符合」才打勾；需改善／請注意用警告；步數、核心說明等用 info。
+    static func tone(for line: String) -> SummaryLineTone {
+        let text = line.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 先判達成，避免「沒有明顯需要改善」被「改善」誤判成警告。
+        let positiveHints = [
+            "整體姿勢穩定",
+            "沒有明顯需要改善",
+            "符合正確",
+            "核心指標穩定",
+            "背面核心指標穩定",
+            "側面核心指標穩定",
+            "穩定，符合",
+            "bpm 符合",
+            "合理的安全步態",
+            "合理的自我保護",
+            "bpm 活潑",
+            "姿勢「好」",
+        ]
+        if positiveHints.contains(where: { text.contains($0) }) {
+            return .positive
+        }
+
+        let warningHints = [
+            "需注意", "偏大", "不足", "持續異常", "異常：",
+            "請", "偏低", "略高", "差距偏大",
+            "可針對上述", "改善程度",
+            "尚未取得", "無法", "失敗",
+            "前傾過大", "過度跨步", "拖步", "左右晃",
+            "姿勢「壞」",
+        ]
+        if warningHints.contains(where: { text.contains($0) }) {
+            return .warning
+        }
+        // 「約 N% 時段…」多半是問題佔比，原則說明不會用這個句型。
+        if text.contains("約"), text.contains("%"), text.contains("時段") {
+            return .warning
+        }
+        return .neutral
+    }
+}
+
+private struct SummaryAdviceRow: View {
+    let line: String
+
+    var body: some View {
+        let tone = SummaryLineTone.tone(for: line)
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: tone.systemImage)
+                .foregroundStyle(tone.color)
+            Text(line)
+                .font(.body)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityLabel("\(tone == .warning ? "需注意" : tone == .positive ? "達標" : "資訊")：\(line)")
+    }
+}
+
 // MARK: - 影片分析摘要 Sheet
 
 private struct VideoSummarySheet: View {
@@ -2071,14 +2153,7 @@ private struct VideoSummarySheet: View {
                     }
 
                     ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(.indigo)
-                            Text(line)
-                                .font(.body)
-                                .multilineTextAlignment(.leading)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
+                        SummaryAdviceRow(line: line)
                     }
                     Text("註：暫停影片時會自動產生摘要並寫入歷史紀錄。")
                         .font(.footnote)
@@ -2160,6 +2235,7 @@ private struct VideoSummarySheet: View {
 private struct SummaryHistorySheet: View {
     @ObservedObject var store: SummaryStore
     let onClose: () -> Void
+    @State private var showClearConfirm = false
 
     private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -2223,7 +2299,7 @@ private struct SummaryHistorySheet: View {
                 ToolbarItem(placement: .topBarLeading) {
                     if !store.items.isEmpty {
                         Button(role: .destructive) {
-                            store.clear()
+                            showClearConfirm = true
                         } label: {
                             Text("清空")
                         }
@@ -2232,6 +2308,14 @@ private struct SummaryHistorySheet: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("完成", action: onClose)
                 }
+            }
+            .alert("確認清空歷史紀錄？", isPresented: $showClearConfirm) {
+                Button("取消", role: .cancel) {}
+                Button("清空", role: .destructive) {
+                    store.clear()
+                }
+            } message: {
+                Text("將刪除全部歷史摘要，此操作無法復原。")
             }
         }
     }
@@ -2246,13 +2330,7 @@ private struct SummaryHistorySheet: View {
                     .foregroundStyle(.secondary)
                 Divider()
                 ForEach(Array(item.lines.enumerated()), id: \.offset) { _, line in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.indigo)
-                        Text(line)
-                            .font(.body)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
+                    SummaryAdviceRow(line: line)
                 }
             }
             .padding(20)
@@ -2273,6 +2351,7 @@ private struct PoseDatabaseSheet: View {
     @State private var totalNodes: Int = 0
     @State private var exportURL: URL?
     @State private var exportError: String?
+    @State private var showClearConfirm = false
 
     private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -2359,8 +2438,7 @@ private struct PoseDatabaseSheet: View {
                 ToolbarItem(placement: .topBarLeading) {
                     if !records.isEmpty {
                         Button(role: .destructive) {
-                            database.clearAll()
-                            reload()
+                            showClearConfirm = true
                         } label: {
                             Text("清空")
                         }
@@ -2381,6 +2459,15 @@ private struct PoseDatabaseSheet: View {
                         Button("完成", action: onClose)
                     }
                 }
+            }
+            .alert("確認清空資料庫？", isPresented: $showClearConfirm) {
+                Button("取消", role: .cancel) {}
+                Button("清空", role: .destructive) {
+                    database.clearAll()
+                    reload()
+                }
+            } message: {
+                Text("將刪除全部姿勢節點紀錄，此操作無法復原。")
             }
             .sheet(isPresented: Binding(
                 get: { exportURL != nil },
