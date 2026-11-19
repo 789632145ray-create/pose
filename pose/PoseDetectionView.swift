@@ -1440,7 +1440,8 @@ struct PoseDetectionView: View {
         if fullReset {
             if !preserveAnalysis {
                 analysisPipeline.reset()
-                resetStepUIState()                livePrediction = nil
+                resetStepUIState()
+                livePrediction = nil
                 videoQualityResult = nil
             }
             quickPoseEngine.dbNodeCount = 0
