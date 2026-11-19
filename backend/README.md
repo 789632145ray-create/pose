@@ -121,10 +121,12 @@ python train.py --engine mediapipe --from-json mediapipe_training_export.json
 ```
 
 - MediaPipe 會讀 `mediapipe_sessions`，以及回退寫進 `pose_sessions` 且 `engine=mediapipe` 的資料。
-- 特徵：每個 session 的 35 個關節在所有影格的 (x,y,z) 平均與標準差（共 210 維）。
-- 模型：RandomForest 二元分類（good / bad）。
-- 樣本太少或只有單一標籤時會提示先補資料（建議好、壞各至少數筆）。
-- 訓練後重啟後端；App 的 MediaPipe 引擎會呼叫 `POST /mediapipe/predict`。
+- 特徵（與 `/predict`、`/mediapipe/predict` 共用 `session_features`）：過濾 `visibility < 0.5`、只留跑走核心關節、以 `hip_mid`／軀幹長度標準化，座標取 mean／std，並加入膝／髖／軀幹前傾／骨盆傾斜角（mean／std／min／max）。
+- 訓練時用與推論相同的 `window_size=30`、`stride=15` 切時間窗；`GroupShuffleSplit` 依 session 分組；僅訓練集做水平翻轉增強。
+- 模型：RandomForest（`n_estimators=300, max_depth=10, min_samples_leaf=2, class_weight=balanced`）。
+- **舊 210 維 joblib 不相容**，改特徵後請重新訓練並重啟後端。
+- 樣本太少或只有單一標籤時會提示先補資料（建議好、壞各至少數筆、至少 2 個 session）。
+- 訓練後重啟後端；App 的 MediaPipe／自訓 MediaPipe 模型會呼叫 `POST /mediapipe/predict`。
 
 ## 6. 正式環境注意
 
