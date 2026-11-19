@@ -378,17 +378,20 @@ final class PoseAnalysisPipeline {
         }
 
         let emitted = stepDetector.ingest(leftAnkleY: leftRel, rightAnkleY: rightRel)
+        // 固定位數寬度，避免左上角 HUD 隨步數位數增減而伸縮。
         let hud: String
         if let last = stepDetector.lastEvent {
-            let bpmText: String
-            if let bpm = last.cadenceBPM {
-                bpmText = String(format: " · %.0f bpm", bpm)
-            } else {
-                bpmText = ""
-            }
-            hud = "步數 L:\(stepDetector.leftSteps) R:\(stepDetector.rightSteps) 總:\(stepDetector.totalSteps) · 上一步 \(last.side.localizedLabel)\(bpmText)"
+            let bpm = last.cadenceBPM.map { String(format: "%3.0f", $0) } ?? "  —"
+            hud = String(
+                format: "L:%3d R:%3d 總:%3d ·%@ %@bpm",
+                stepDetector.leftSteps,
+                stepDetector.rightSteps,
+                stepDetector.totalSteps,
+                last.side.localizedLabel,
+                bpm
+            )
         } else {
-            hud = "步數 L:0 R:0 總:0"
+            hud = String(format: "L:%3d R:%3d 總:%3d ·—   —bpm", 0, 0, 0)
         }
 
         return PoseStepFrameResult(

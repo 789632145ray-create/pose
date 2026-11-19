@@ -81,7 +81,7 @@ final class QuickPoseEngine: ObservableObject {
     @Published var previewNodes: [PoseNode] = []
     @Published var isEngineStarting = false
     @Published var statusHint = ""
-    @Published var stepHUD = "步數 L:0 R:0 總:0"
+    @Published var stepHUD = String(format: "L:%3d R:%3d 總:%3d ·—   —bpm", 0, 0, 0)
     @Published var dbNodeCount = 0
     @Published var recentSteps: [StepEvent] = []
     @Published private(set) var frameCallbackCount = 0
@@ -273,9 +273,6 @@ final class QuickPoseEngine: ObservableObject {
         overlayImage = nil
         previewNodes = []
         isEngineStarting = false
-        dbNodeCount = 0
-        recentSteps = []
-        stepHUD = "步數 L:0 R:0 總:0"
         clearAnalysisBuffers()
     }
 
@@ -285,7 +282,7 @@ final class QuickPoseEngine: ObservableObject {
         backViewPipeline.reset()
         sideViewPreprocessor.reset()
         recentSteps = []
-        stepHUD = "步數 L:0 R:0 總:0"
+        stepHUD = String(format: "L:%3d R:%3d 總:%3d ·—   —bpm", 0, 0, 0)
         dbNodeCount = 0
     }
 
@@ -1088,7 +1085,7 @@ struct PoseDetectionView: View {
 
     @MainActor
     private func resetStepUIState() {
-        quickPoseEngine.stepHUD = "步數 L:0 R:0 總:0"
+        quickPoseEngine.stepHUD = String(format: "L:%3d R:%3d 總:%3d ·—   —bpm", 0, 0, 0)
         quickPoseEngine.recentSteps = []
         stepFlashSide = nil
         stepFlashOpacity = 0
@@ -1922,44 +1919,24 @@ struct PoseDetectionView: View {
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.orange)
                 }
-                if case .liveCamera = detectionSource, !ProcessInfo.processInfo.isiOSAppOnMac {
-                    Text(useFrontCamera ? "鏡頭 · 前" : "鏡頭 · 後")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.cyan)
-                }
             }
-            Text(quickPoseEngine.fpsText)
-                .font(.system(size: 16, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white)
             if !quickPoseEngine.statusHint.isEmpty {
                 Text(quickPoseEngine.statusHint)
                     .font(.caption)
                     .foregroundStyle(.yellow)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // 固定寬高，避免步數變大時左上角區塊一直伸縮。
             Text(quickPoseEngine.stepHUD)
-                .font(.caption2.weight(.semibold))
+                .font(.caption2.weight(.semibold).monospacedDigit())
                 .foregroundStyle(.mint)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("資料庫節點：\(quickPoseEngine.dbNodeCount)")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.teal)
-            if usesMediaPipeDataPlane {
-                Text("寫入 \(MediaPipeRealm.fileName)")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.mint)
-            }
-            if quickPoseEngine.loopActive, quickPoseEngine.frameCallbackCount == 0 {
-                Text("等待第一幀…")
-                    .font(.caption2)
-                    .foregroundStyle(.yellow)
-            } else if quickPoseEngine.frameCallbackCount > 0 {
-                Text("引擎回呼 \(quickPoseEngine.frameCallbackCount) 次")
-                    .font(.caption2)
-                    .foregroundStyle(.green.opacity(0.85))
-            }
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .frame(width: 210, height: 16, alignment: .leading)
             qualityBadgeIfNeeded
         }
+        .frame(width: 226, alignment: .leading)
         .padding(8)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
     }
