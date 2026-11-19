@@ -522,9 +522,18 @@ extension MediaPipeNativePoseEngine: AVCaptureVideoDataOutputSampleBufferDelegat
 
 extension MediaPipeNativePoseEngine {
 #if canImport(MediaPipeTasksVision)
-    fileprivate static func probability(_ value: NSNumber?) -> Double {
-        guard let value else { return 0 }
-        return Double(truncating: value)
+    /// 相容 MediaPipe `NSNumber?` 與未來若改為 `Float?` 的 visibility／presence。
+    fileprivate static func probability(_ value: Any?) -> Double {
+        switch value {
+        case let number as NSNumber:
+            return Double(truncating: number)
+        case let float as Float:
+            return Double(float)
+        case let double as Double:
+            return double
+        default:
+            return 0
+        }
     }
 #endif
 

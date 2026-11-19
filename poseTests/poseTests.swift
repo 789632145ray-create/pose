@@ -84,6 +84,36 @@ final class poseTests: XCTestCase {
         XCTAssertTrue(PoseAssessmentEngine.requiresPoseRuntimeRestart(from: .mediaPipe, to: .trainedModel))
     }
 
+    func testPoseAdviceEvaluateNodesDetectsShoulderTilt() {
+        var samples: [MediaPipeLandmarkMapper.LandmarkSample] = []
+        for i in 0..<33 {
+            samples.append(
+                MediaPipeLandmarkMapper.LandmarkSample(
+                    x: 0.5, y: 0.5, z: 0, visibility: 0.9, presence: 0.9
+                )
+            )
+        }
+        // left_shoulder=11, right_shoulder=12 — 製造明顯高低差
+        samples[11] = MediaPipeLandmarkMapper.LandmarkSample(
+            x: 0.4, y: 0.30, z: 0, visibility: 0.9, presence: 0.9
+        )
+        samples[12] = MediaPipeLandmarkMapper.LandmarkSample(
+            x: 0.6, y: 0.42, z: 0, visibility: 0.9, presence: 0.9
+        )
+        samples[23] = MediaPipeLandmarkMapper.LandmarkSample(
+            x: 0.4, y: 0.6, z: 0, visibility: 0.9, presence: 0.9
+        )
+        samples[24] = MediaPipeLandmarkMapper.LandmarkSample(
+            x: 0.6, y: 0.6, z: 0, visibility: 0.9, presence: 0.9
+        )
+        samples[0] = MediaPipeLandmarkMapper.LandmarkSample(
+            x: 0.5, y: 0.2, z: 0, visibility: 0.9, presence: 0.9
+        )
+        let advice = PoseAdvice.evaluate(nodes: MediaPipeLandmarkMapper.nodes(from: samples))
+        XCTAssertTrue(advice.issues.contains(.shoulderTilt), "\(advice.issues)")
+        XCTAssertFalse(advice.lines.isEmpty)
+    }
+
     func testMediaPipeLandmarkMapperBuildsNodesAndSnapshot() {
         var samples: [MediaPipeLandmarkMapper.LandmarkSample] = []
         for i in 0..<33 {
