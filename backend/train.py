@@ -10,7 +10,7 @@
 
 使用：
   python train.py                         # 訓練 QuickPose／自訓模型資料 → pose_quality_model.joblib
-  python train.py --engine mediapipe      # 訓練 MediaPipe 蒐集資料 → mediapipe_quality_model.joblib
+  python train.py --engine mediapipe      # 訓練「MediaPipe 引擎」原生採樣資料 → mediapipe_quality_model.joblib
   python train.py --engine mediapipe --export
   python train.py --engine all            # 兩套資料合併成 pose_quality_model.joblib
 
@@ -272,7 +272,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--engine",
         choices=("pose", "mediapipe", "all"),
         default="pose",
-        help="pose=QuickPose／自訓模型；mediapipe=MediaPipe 蒐集資料；all=合併",
+        help="pose=QuickPose／自訓模型；mediapipe=原生 MediaPipe 引擎蒐集資料；all=合併",
     )
     parser.add_argument("--export", action="store_true", help="另外匯出 CSV")
     parser.add_argument(

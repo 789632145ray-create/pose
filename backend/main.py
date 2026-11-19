@@ -666,7 +666,7 @@ def get_model(engine: str = "pose") -> dict:
     path = MEDIAPIPE_MODEL_PATH if key == "mediapipe" else MODEL_PATH
     if not os.path.exists(path):
         hint = (
-            "尚未訓練 MediaPipe 模型，請先用 App 標好／壞上傳後執行：python train.py --engine mediapipe"
+            "尚未訓練 MediaPipe 模型。請用 App「MediaPipe」引擎（原生 Landmarker）採樣、標好／壞上傳後執行：python train.py --engine mediapipe"
             if key == "mediapipe"
             else "尚未訓練模型，請先用 train.py 訓練並產生 pose_quality_model.joblib"
         )

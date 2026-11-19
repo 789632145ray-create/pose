@@ -2,13 +2,14 @@
 //  MediaPipeNativePoseEngine.swift
 //  pose
 //
-//  真正的 Google MediaPipe Tasks Vision Pose Landmarker（非 QuickPose 內建）。
-//  僅在「MediaPipe」引擎啟用：AVCapture → PoseLandmarker → PoseNode。
+//  真正的 Google MediaPipe Tasks Vision Pose Landmarker（不經 QuickPose）。
+//  相機：liveStream；影片：VIDEO 模式逐幀 detect。兩者都寫入 mediapipe.realm。
 //
 
 import AVFoundation
 import Combine
 import Foundation
+import QuartzCore
 import SwiftUI
 
 #if canImport(MediaPipeTasksVision)
@@ -26,6 +27,8 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
     @Published var isRunning = false
     @Published var isEngineStarting = false
     @Published var lastError: String?
+    /// 影片模式供 SwiftUI 預覽層綁定。
+    @Published var videoPlayer: AVPlayer?
 
     var detectionActive = false
     var activityMode: GaitActivityMode = .walking
@@ -41,7 +44,16 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
 
     var onStreamEnqueue: (([PoseNode], Double) -> Void)?
     var onStepEvents: (([StepEvent]) -> Void)?
+    /// 影片播完時回呼（主執行緒），方便自動產生摘要。
+    var onVideoPlaybackEnded: (() -> Void)?
 
+    private enum RuntimeKind {
+        case idle
+        case camera
+        case video
+    }
+
+    private var runtimeKind: RuntimeKind = .idle
     private let session = AVCaptureSession()
     private let videoOutput = AVCaptureVideoDataOutput()
     private let sessionQueue = DispatchQueue(label: "pose.mediapipe.capture")
@@ -49,12 +61,20 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
     private var fpsWindowStart = Date()
     private var useFrontCamera = false
 
+    private var videoOutputItem: AVPlayerItemVideoOutput?
+    private var displayLink: CADisplayLink?
+    private var displayLinkProxy: DisplayLinkProxy?
+    private var lastVideoTimestampMs = -1
+    private var endObserver: NSObjectProtocol?
+
 #if canImport(MediaPipeTasksVision)
-    /// 僅在 capture queue 存取。
-    nonisolated(unsafe) private var poseLandmarker: PoseLandmarker?
+    /// 相機 liveStream；僅在 capture queue 存取。
+    nonisolated(unsafe) private var liveLandmarker: PoseLandmarker?
+    /// 影片 VIDEO 模式；主執行緒／display link 存取。
+    private var videoLandmarker: PoseLandmarker?
 #endif
 
-    /// 給 SwiftUI 預覽層綁定用。
+    /// 給 SwiftUI 相機預覽層綁定用。
     var captureSessionForPreview: AVCaptureSession { session }
 
     @MainActor
@@ -93,16 +113,20 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
         jointConfidenceFilter.flush()
     }
 
+    // MARK: - Camera
+
     @MainActor
     func start(useFrontCamera: Bool) {
+        tearDownVideoRuntime()
         self.useFrontCamera = useFrontCamera
         lastError = nil
         isEngineStarting = true
         statusHint = "正在啟動 MediaPipe…"
 #if canImport(MediaPipeTasksVision)
+        runtimeKind = .camera
         sessionQueue.async { [weak self] in
             self?.configureSessionIfNeeded()
-            self?.ensureLandmarker()
+            self?.ensureLiveLandmarker()
             self?.session.startRunning()
             DispatchQueue.main.async {
                 self?.isRunning = true
@@ -122,16 +146,41 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
     @MainActor
     func stop() {
         detectionActive = false
+        stopDisplayLink()
+        if runtimeKind == .video {
+            videoPlayer?.pause()
+        }
         sessionQueue.async { [weak self] in
             self?.session.stopRunning()
             DispatchQueue.main.async {
-                self?.isRunning = false
-                self?.statusHint = "MediaPipe 已停止"
+                self?.isRunning = self?.runtimeKind == .video && self?.videoPlayer != nil
+                if self?.runtimeKind == .camera {
+                    self?.runtimeKind = .idle
+                    self?.statusHint = "MediaPipe 已停止"
+                }
             }
         }
     }
 
+    /// 離開畫面時徹底釋放相機與影片 runtime。
+    @MainActor
+    func shutdown() {
+        detectionActive = false
+        stopDisplayLink()
+        tearDownVideoRuntime()
+        sessionQueue.async { [weak self] in
+            self?.session.stopRunning()
+#if canImport(MediaPipeTasksVision)
+            self?.liveLandmarker = nil
+#endif
+        }
+        runtimeKind = .idle
+        isRunning = false
+        statusHint = "MediaPipe 已停止"
+    }
+
     func switchCamera(useFrontCamera: Bool) {
+        guard runtimeKind == .camera else { return }
         guard self.useFrontCamera != useFrontCamera else { return }
         self.useFrontCamera = useFrontCamera
         sessionQueue.async { [weak self] in
@@ -145,9 +194,163 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - Video（原生 VIDEO 模式，不經 QuickPose）
+
+    @MainActor
+    func prepareVideo(url: URL) {
+        stopCameraSessionOnly()
+        tearDownVideoRuntime()
+        lastError = nil
+        lastVideoTimestampMs = -1
+        previewNodes = []
+
 #if canImport(MediaPipeTasksVision)
-    private func ensureLandmarker() {
-        guard poseLandmarker == nil else { return }
+        guard ensureVideoLandmarker() else { return }
+
+        let item = AVPlayerItem(url: url)
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ])
+        item.add(output)
+        videoOutputItem = output
+
+        let player = AVPlayer(playerItem: item)
+        player.actionAtItemEnd = .pause
+        videoPlayer = player
+        runtimeKind = .video
+        isRunning = true
+        isEngineStarting = false
+        statusHint = "MediaPipe 影片已載入（原生 Landmarker）"
+        adviceLines = ["按「開始」以 Google MediaPipe 分析影片；不會經過 QuickPose。"]
+
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.handleVideoEnded()
+            }
+        }
+#else
+        lastError = "尚未連結 MediaPipeTasksVision，無法以原生 MediaPipe 分析影片。"
+        statusHint = lastError ?? ""
+        adviceLines = [statusHint]
+#endif
+    }
+
+    /// 開始／停止影片寫入：播放並抽幀送入 Landmarker。
+    @MainActor
+    func setVideoDetectionActive(_ active: Bool) {
+        guard runtimeKind == .video else { return }
+        detectionActive = active
+        if active {
+            lastVideoTimestampMs = -1
+            jointConfidenceFilter.reset()
+            if let player = videoPlayer {
+                player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
+                player.play()
+            }
+            startDisplayLink()
+            statusHint = "MediaPipe 影片分析中"
+            adviceLines = ["原生 MediaPipe 正在分析影片…"]
+        } else {
+            stopDisplayLink()
+            videoPlayer?.pause()
+        }
+    }
+
+    @MainActor
+    private func handleVideoEnded() {
+        stopDisplayLink()
+        detectionActive = false
+        statusHint = "影片播放結束"
+        onVideoPlaybackEnded?()
+    }
+
+    @MainActor
+    private func tearDownVideoRuntime() {
+        stopDisplayLink()
+        if let endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+            self.endObserver = nil
+        }
+        videoPlayer?.pause()
+        videoPlayer = nil
+        videoOutputItem = nil
+        lastVideoTimestampMs = -1
+#if canImport(MediaPipeTasksVision)
+        videoLandmarker = nil
+#endif
+        if runtimeKind == .video {
+            runtimeKind = .idle
+        }
+    }
+
+    @MainActor
+    private func stopCameraSessionOnly() {
+        detectionActive = false
+        sessionQueue.async { [weak self] in
+            self?.session.stopRunning()
+        }
+#if canImport(MediaPipeTasksVision)
+        sessionQueue.async { [weak self] in
+            self?.liveLandmarker = nil
+        }
+#endif
+        if runtimeKind == .camera {
+            runtimeKind = .idle
+        }
+    }
+
+    @MainActor
+    private func startDisplayLink() {
+        stopDisplayLink()
+        let proxy = DisplayLinkProxy(engine: self)
+        displayLinkProxy = proxy
+        let link = CADisplayLink(target: proxy, selector: #selector(DisplayLinkProxy.tick))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+    }
+
+    @MainActor
+    private func stopDisplayLink() {
+        displayLink?.invalidate()
+        displayLink = nil
+        displayLinkProxy = nil
+    }
+
+    @MainActor
+    fileprivate func pullVideoFrameIfNeeded() {
+        guard runtimeKind == .video, detectionActive else { return }
+        guard let player = videoPlayer, let output = videoOutputItem else { return }
+        let time = player.currentTime()
+        guard time.isNumeric, time.seconds >= 0 else { return }
+        let itemTime = time
+        guard output.hasNewPixelBuffer(forItemTime: itemTime) else { return }
+        var displayTime = CMTime.zero
+        guard let pixelBuffer = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: &displayTime) else {
+            return
+        }
+        let ts = max(0, Int(CMTimeGetSeconds(itemTime) * 1000))
+        guard ts > lastVideoTimestampMs else { return }
+        lastVideoTimestampMs = ts
+
+#if canImport(MediaPipeTasksVision)
+        guard let landmarker = videoLandmarker else { return }
+        guard let image = try? MPImage(pixelBuffer: pixelBuffer) else { return }
+        do {
+            let result = try landmarker.detect(videoFrame: image, timestampInMilliseconds: ts)
+            applyLandmarkerResult(result, noPersonHint: "影片中尚未偵測到人物。")
+        } catch {
+            statusHint = "MediaPipe 影片：\(error.localizedDescription)"
+        }
+#endif
+    }
+
+#if canImport(MediaPipeTasksVision)
+    private func ensureLiveLandmarker() {
+        guard liveLandmarker == nil else { return }
         guard let modelPath = Bundle.main.path(forResource: "pose_landmarker_full", ofType: "task") else {
             Task { @MainActor in
                 self.lastError = "找不到 pose_landmarker_full.task，請確認已加入 App Bundle"
@@ -164,13 +367,62 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
         options.minTrackingConfidence = 0.5
         options.poseLandmarkerLiveStreamDelegate = self
         do {
-            poseLandmarker = try PoseLandmarker(options: options)
+            liveLandmarker = try PoseLandmarker(options: options)
         } catch {
             Task { @MainActor in
                 self.lastError = "MediaPipe 初始化失敗：\(error.localizedDescription)"
                 self.statusHint = self.lastError ?? ""
             }
         }
+    }
+
+    @MainActor
+    @discardableResult
+    private func ensureVideoLandmarker() -> Bool {
+        if videoLandmarker != nil { return true }
+        guard let modelPath = Bundle.main.path(forResource: "pose_landmarker_full", ofType: "task") else {
+            lastError = "找不到 pose_landmarker_full.task，請確認已加入 App Bundle"
+            statusHint = lastError ?? ""
+            adviceLines = [statusHint]
+            return false
+        }
+        let options = PoseLandmarkerOptions()
+        options.baseOptions.modelAssetPath = modelPath
+        options.runningMode = .video
+        options.numPoses = 1
+        options.minPoseDetectionConfidence = 0.5
+        options.minPosePresenceConfidence = 0.5
+        options.minTrackingConfidence = 0.5
+        do {
+            videoLandmarker = try PoseLandmarker(options: options)
+            return true
+        } catch {
+            lastError = "MediaPipe 影片初始化失敗：\(error.localizedDescription)"
+            statusHint = lastError ?? ""
+            adviceLines = [statusHint]
+            return false
+        }
+    }
+
+    @MainActor
+    private func applyLandmarkerResult(_ result: PoseLandmarkerResult?, noPersonHint: String) {
+        guard let result, let pose = result.landmarks.first else {
+            previewNodes = []
+            if detectionActive {
+                adviceLines = [noPersonHint]
+            }
+            return
+        }
+        let samples: [MediaPipeLandmarkMapper.LandmarkSample] = pose.map { lm in
+            MediaPipeLandmarkMapper.LandmarkSample(
+                x: Double(lm.x),
+                y: Double(lm.y),
+                z: Double(lm.z),
+                visibility: Self.probability(lm.visibility),
+                presence: Self.probability(lm.presence ?? lm.visibility)
+            )
+        }
+        handleNativeLandmarks(samples)
     }
 #endif
 
@@ -212,6 +464,18 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
     }
 }
 
+// MARK: - DisplayLink bridge
+
+private final class DisplayLinkProxy: NSObject {
+    weak var engine: MediaPipeNativePoseEngine?
+    init(engine: MediaPipeNativePoseEngine) { self.engine = engine }
+    @objc func tick() {
+        Task { @MainActor in
+            self.engine?.pullVideoFrameIfNeeded()
+        }
+    }
+}
+
 #if canImport(MediaPipeTasksVision)
 extension MediaPipeNativePoseEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
     nonisolated func captureOutput(
@@ -222,8 +486,7 @@ extension MediaPipeNativePoseEngine: AVCaptureVideoDataOutputSampleBufferDelegat
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let ts = Int(Date().timeIntervalSince1970 * 1000)
         guard let image = try? MPImage(pixelBuffer: pixelBuffer) else { return }
-        // 在 capture queue 直接送入 Landmarker；結果由 delegate 回呼。
-        try? poseLandmarker?.detectAsync(image: image, timestampInMilliseconds: ts)
+        try? liveLandmarker?.detectAsync(image: image, timestampInMilliseconds: ts)
     }
 }
 
@@ -240,28 +503,8 @@ extension MediaPipeNativePoseEngine: PoseLandmarkerLiveStreamDelegate {
             }
             return
         }
-        guard let result, let pose = result.landmarks.first else {
-            Task { @MainActor in
-                self.previewNodes = []
-                if self.detectionActive {
-                    self.adviceLines = ["畫面中尚未偵測到人物，請站到鏡頭前。"]
-                }
-            }
-            return
-        }
-
-        let samples: [MediaPipeLandmarkMapper.LandmarkSample] = pose.map { lm in
-            MediaPipeLandmarkMapper.LandmarkSample(
-                x: Double(lm.x),
-                y: Double(lm.y),
-                z: Double(lm.z),
-                visibility: Self.probability(lm.visibility),
-                presence: Self.probability(lm.presence ?? lm.visibility)
-            )
-        }
-
         Task { @MainActor in
-            self.handleNativeLandmarks(samples)
+            self.applyLandmarkerResult(result, noPersonHint: "畫面中尚未偵測到人物，請站到鏡頭前。")
         }
     }
 }
@@ -279,7 +522,6 @@ extension MediaPipeNativePoseEngine: AVCaptureVideoDataOutputSampleBufferDelegat
 
 extension MediaPipeNativePoseEngine {
 #if canImport(MediaPipeTasksVision)
-    /// MediaPipe `NormalizedLandmark.visibility`／`presence` 為可選 NSNumber。
     fileprivate static func probability(_ value: NSNumber?) -> Double {
         guard let value else { return 0 }
         return Double(truncating: value)

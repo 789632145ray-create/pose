@@ -112,7 +112,7 @@ App 端在「節點資料庫」畫面選好「好 / 壞」標籤並上傳幾筆�
 cd backend
 source .venv/bin/activate
 python train.py                         # QuickPose／自訓模型 → pose_quality_model.joblib
-python train.py --engine mediapipe      # MediaPipe 蒐集資料 → mediapipe_quality_model.joblib
+python train.py --engine mediapipe      # 原生 MediaPipe 引擎採樣 → mediapipe_quality_model.joblib
 python train.py --engine mediapipe --export
 
 # 手機上傳在 Atlas；本機預設 localhost 是空的。不要複製 mongodb+srv://...

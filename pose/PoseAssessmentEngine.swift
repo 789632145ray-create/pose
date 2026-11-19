@@ -4,8 +4,8 @@
 //
 //  偵測系統版本（三種都走完整管線：相機／影片、節點庫、標好壞）：
 //  - QuickPose：輕量骨架 + 規則建議
-//  - MediaPipe：相機走 Google Pose Landmarker 原生抓關節；影片暫仍 QuickPose 管線
-//  - 自訓模型：後端 RandomForest 好／壞品質辨識
+//  - MediaPipe：Google Pose Landmarker 原生抓關節（相機／影片）→ mediapipe.realm
+//  - 自訓模型：QuickPose 骨架 + 後端 RandomForest（pose.realm／/predict）
 //
 
 import Foundation
@@ -30,9 +30,9 @@ enum PoseAssessmentEngine: String, CaseIterable, Identifiable, Codable {
         case .quickPose:
             return "QuickPose SDK 骨架 + 規則建議"
         case .mediaPipe:
-            return "Google MediaPipe Pose Landmarker 原生抓關節"
+            return "Google MediaPipe 原生抓關節（相機／影片）"
         case .trainedModel:
-            return "後端 RandomForest 好／壞品質辨識"
+            return "QuickPose 骨架 + 雲端好／壞品質辨識"
         }
     }
 
@@ -41,9 +41,9 @@ enum PoseAssessmentEngine: String, CaseIterable, Identifiable, Codable {
         case .quickPose:
             return "完整偵測畫面：相機／影片、步態、節點庫、標好／壞"
         case .mediaPipe:
-            return "相機使用 Google MediaPipeTasksVision 原生偵測；寫入 mediapipe.realm"
+            return "原生 Pose Landmarker 蒐集訓練資料；寫入 mediapipe.realm，不經 QuickPose"
         case .trainedModel:
-            return "步態分析、節點資料庫、雲端品質模型"
+            return "pose.realm + /predict；與 MediaPipe 資料庫分開"
         }
     }
 
@@ -88,7 +88,7 @@ enum PoseAssessmentEngine: String, CaseIterable, Identifiable, Codable {
         self == .mediaPipe ? "mediapipe" : "pose"
     }
 
-    /// QuickPose／自訓仍共用 QuickPose Full；MediaPipe 相機改走原生 Landmarker。
+    /// QuickPose／自訓共用 QuickPose Full；MediaPipe 走原生 Landmarker。
     var usesFullPoseModel: Bool { true }
 
     /// 進出 MediaPipe 需切換相機 runtime（QuickPose ↔ 原生 MediaPipe）。

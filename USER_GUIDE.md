@@ -55,8 +55,8 @@
 | 引擎 | 說明 |
 |------|------|
 | QuickPose | 官方 overlay，規則建議 |
-| MediaPipe | **相機**使用 Google MediaPipe Pose Landmarker 原生抓關節；寫入 `mediapipe.realm`（影片暫仍走 QuickPose 管線） |
-| 自訓模型 | 雲端好／壞辨識；可再選 QuickPose／MediaPipe 骨架路徑；需登入 |
+| MediaPipe | Google Pose Landmarker **原生**抓關節（相機＋影片）；寫入 `mediapipe.realm`，**不經 QuickPose**；標好／壞後用 `train.py --engine mediapipe` 訓練 |
+| 自訓模型 | QuickPose 骨架＋雲端好／壞辨識；寫入 `pose.realm`／`/predict`；需登入 |
 
 ---
 

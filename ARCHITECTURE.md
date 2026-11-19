@@ -183,7 +183,7 @@ Landmarks → 低通(5幀) → 骨盆中心歸一 → 左右腳踝 y 峰谷 → 
 | 模型健康檢查 | `GET /health/model` |
 | 引擎選擇 | `pose/PoseAssessmentEngine.swift`（`.quickPose` / `.mediaPipe` / `.trainedModel`） |
 
-MediaPipe 模式使用已連結的 `QuickPoseMP-full`（BlazePose Full，`modelComplexity: .good`），在裝置上做骨架與規則建議，**不呼叫** `/predict`。自訓模型模式同樣用 Full 骨架，再串流到後端 RandomForest。
+MediaPipe 引擎使用 Google `MediaPipeTasksVision` Pose Landmarker 原生抓關節（相機 liveStream／影片 VIDEO），寫入 `mediapipe.realm` 並可走 `/mediapipe/predict`。自訓模型模式使用 QuickPose Full 骨架，再串流到後端 RandomForest（`pose.realm`／`/predict`）。
 
 **回傳範例：**
 

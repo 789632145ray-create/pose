@@ -22,7 +22,6 @@ struct AppMenuSheet: View {
                 accountSection
                 actionsSection
                 engineSection
-                skeletonSection
                 signOutSection
             }
             .navigationTitle("選單")
@@ -73,31 +72,7 @@ struct AppMenuSheet: View {
         } header: {
             Text("偵測引擎（3 種）")
         } footer: {
-            Text("QuickPose 為官方 overlay；MediaPipe 相機使用 Google Pose Landmarker 原生抓關節；自訓模型會連雲端辨識。")
-        }
-    }
-
-    private var skeletonSection: some View {
-        Section {
-            ForEach(PoseSkeletonModel.allCases) { model in
-                Button {
-                    modeStore.skeletonModel = model
-                } label: {
-                    HStack {
-                        Text(model.title)
-                        Spacer()
-                        if modeStore.skeletonModel == model {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(Color.accentColor)
-                        }
-                    }
-                }
-                .foregroundStyle(.primary)
-            }
-        } header: {
-            Text("自訓模型：骨架／品質模型")
-        } footer: {
-            Text("只在「自訓模型」時使用。QuickPose 模型 → pose.realm + /predict；MediaPipe 模型 → mediapipe.realm + /mediapipe/predict。切換不會刪除既有節點資料。")
+            Text("QuickPose 為官方 overlay；MediaPipe 以 Google Pose Landmarker 原生抓關節（相機／影片）並寫入 mediapipe.realm；自訓模型走 pose.realm 雲端辨識。")
         }
     }
 

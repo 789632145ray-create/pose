@@ -26,7 +26,7 @@ private enum UserGuideContent {
             id: 1,
             systemImage: "camera.fill",
             title: "先允許相機並選好設定",
-            detail: "首次請允許使用相機。底部可選偵測引擎、走路／跑步，以及拍攝視角（正面／側面／背面）。自訓模型還可再選骨架模型。"
+            detail: "首次請允許使用相機。底部可選偵測引擎（QuickPose／MediaPipe／自訓）、走路／跑步，以及拍攝視角（正面／側面／背面）。要用 MediaPipe 訓練請選 MediaPipe 引擎，勿再經 QuickPose。"
         ),
         UserGuideStep(
             id: 2,
