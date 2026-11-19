@@ -1812,11 +1812,7 @@ struct PoseDetectionView: View {
         ZStack(alignment: .top) {
             cameraSourceView(width: w, height: h)
 
-            QuickPoseOverlayView(overlayImage: $quickPoseEngine.overlayImage, contentMode: .fill)
-                .frame(width: w, height: h)
-                .opacity(quickPoseEngine.overlayImage == nil ? 0 : 1)
-                .allowsHitTesting(false)
-
+            // MediaPipe 引擎改畫自訂青色骨架；此時隱藏 QuickPose 原生白骨架，避免兩套疊在一起。
             if assessmentEngine == .mediaPipe {
                 MediaPipeSkeletonOverlay(
                     nodes: quickPoseEngine.previewNodes,
@@ -1824,6 +1820,11 @@ struct PoseDetectionView: View {
                 )
                 .frame(width: w, height: h)
                 .allowsHitTesting(false)
+            } else {
+                QuickPoseOverlayView(overlayImage: $quickPoseEngine.overlayImage, contentMode: .fill)
+                    .frame(width: w, height: h)
+                    .opacity(quickPoseEngine.overlayImage == nil ? 0 : 1)
+                    .allowsHitTesting(false)
             }
         }
         .id(cameraContentID)
