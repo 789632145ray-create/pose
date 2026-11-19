@@ -1937,7 +1937,9 @@ struct PoseDetectionView: View {
             nativeMediaPipeBackground(width: w, height: h)
             MediaPipeSkeletonOverlay(
                 nodes: mediaPipeEngine.previewNodes,
-                flipHorizontally: skeletonFlipsHorizontally
+                flipHorizontally: skeletonFlipsHorizontally,
+                contentSize: mediaPipeEngine.frameContentSize,
+                videoGravity: .resizeAspectFill
             )
             .frame(width: w, height: h)
             .allowsHitTesting(false)

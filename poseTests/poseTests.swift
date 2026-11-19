@@ -84,6 +84,20 @@ final class poseTests: XCTestCase {
         XCTAssertTrue(PoseAssessmentEngine.requiresPoseRuntimeRestart(from: .mediaPipe, to: .trainedModel))
     }
 
+    func testMediaPipeSkeletonOverlayAspectFillMapping() {
+        let content = CGSize(width: 1080, height: 1920)
+        let view = CGSize(width: 390, height: 844)
+        let rect = MediaPipeSkeletonOverlay.fittedRect(
+            content: content,
+            in: view,
+            gravity: .resizeAspectFill
+        )
+        // aspectFill：以較大比例填滿，寬會超出並左右裁切。
+        XCTAssertGreaterThan(rect.width, view.width - 0.5)
+        XCTAssertEqual(rect.midX, view.width / 2, accuracy: 0.5)
+        XCTAssertEqual(rect.midY, view.height / 2, accuracy: 0.5)
+    }
+
     func testPoseAdviceEvaluateNodesDetectsShoulderTilt() {
         var samples: [MediaPipeLandmarkMapper.LandmarkSample] = []
         for i in 0..<33 {

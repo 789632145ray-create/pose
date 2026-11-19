@@ -11,6 +11,7 @@ import Combine
 import Foundation
 import QuartzCore
 import SwiftUI
+import UIKit
 
 #if canImport(MediaPipeTasksVision)
 import MediaPipeTasksVision
@@ -29,6 +30,8 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
     @Published var lastError: String?
     /// 影片模式供 SwiftUI 預覽層綁定。
     @Published var videoPlayer: AVPlayer?
+    /// MediaPipe 推理影格的直立尺寸；骨架 overlay 依此做 aspectFill 對位。
+    @Published var frameContentSize: CGSize = .zero
 
     var detectionActive = false
     var activityMode: GaitActivityMode = .walking
@@ -66,6 +69,9 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
     private var displayLinkProxy: DisplayLinkProxy?
     private var lastVideoTimestampMs = -1
     private var endObserver: NSObjectProtocol?
+    /// 影片軌 preferredTransform 對應的影像方向（與 AVPlayerLayer 顯示一致）。
+    private var videoFrameOrientation: UIImage.Orientation = .up
+    private var videoUprightSize: CGSize = .zero
 
 #if canImport(MediaPipeTasksVision)
     /// 相機 liveStream；僅在 capture queue 存取。
@@ -203,11 +209,24 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
         lastError = nil
         lastVideoTimestampMs = -1
         previewNodes = []
+        frameContentSize = .zero
 
 #if canImport(MediaPipeTasksVision)
         guard ensureVideoLandmarker() else { return }
 
-        let item = AVPlayerItem(url: url)
+        let asset = AVURLAsset(url: url)
+        if let track = asset.tracks(withMediaType: .video).first {
+            let transform = track.preferredTransform
+            let natural = track.naturalSize
+            videoFrameOrientation = Self.imageOrientation(from: transform)
+            videoUprightSize = Self.uprightSize(natural: natural, orientation: videoFrameOrientation)
+            frameContentSize = videoUprightSize
+        } else {
+            videoFrameOrientation = .up
+            videoUprightSize = .zero
+        }
+
+        let item = AVPlayerItem(asset: asset)
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
         ])
@@ -279,6 +298,11 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
         videoPlayer = nil
         videoOutputItem = nil
         lastVideoTimestampMs = -1
+        videoFrameOrientation = .up
+        videoUprightSize = .zero
+        if runtimeKind == .video {
+            frameContentSize = .zero
+        }
 #if canImport(MediaPipeTasksVision)
         videoLandmarker = nil
 #endif
@@ -336,9 +360,23 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
         guard ts > lastVideoTimestampMs else { return }
         lastVideoTimestampMs = ts
 
+        if videoUprightSize == .zero {
+            let raw = CGSize(
+                width: CGFloat(CVPixelBufferGetWidth(pixelBuffer)),
+                height: CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+            )
+            videoUprightSize = Self.uprightSize(natural: raw, orientation: videoFrameOrientation)
+        }
+        if frameContentSize != videoUprightSize, videoUprightSize.width > 0 {
+            frameContentSize = videoUprightSize
+        }
+
 #if canImport(MediaPipeTasksVision)
         guard let landmarker = videoLandmarker else { return }
-        guard let image = try? MPImage(pixelBuffer: pixelBuffer) else { return }
+        // 必須帶上與 AVPlayerLayer 相同的方向，否則骨架會壓扁／偏移。
+        guard let image = try? MPImage(pixelBuffer: pixelBuffer, orientation: videoFrameOrientation) else {
+            return
+        }
         do {
             let result = try landmarker.detect(videoFrame: image, timestampInMilliseconds: ts)
             applyLandmarkerResult(result, noPersonHint: "影片中尚未偵測到人物。")
@@ -346,6 +384,27 @@ final class MediaPipeNativePoseEngine: NSObject, ObservableObject {
             statusHint = "MediaPipe 影片：\(error.localizedDescription)"
         }
 #endif
+    }
+
+    /// AVAssetTrack.preferredTransform → UIImage.Orientation（對齊播放器顯示）。
+    nonisolated private static func imageOrientation(from transform: CGAffineTransform) -> UIImage.Orientation {
+        let angle = atan2(transform.b, transform.a)
+        let deg = angle * 180 / .pi
+        switch Int(deg.rounded()) {
+        case 90, -270: return .right
+        case -90, 270: return .left
+        case 180, -180: return .down
+        default: return .up
+        }
+    }
+
+    nonisolated private static func uprightSize(natural: CGSize, orientation: UIImage.Orientation) -> CGSize {
+        switch orientation {
+        case .left, .leftMirrored, .right, .rightMirrored:
+            return CGSize(width: natural.height, height: natural.width)
+        default:
+            return natural
+        }
     }
 
 #if canImport(MediaPipeTasksVision)
@@ -484,9 +543,17 @@ extension MediaPipeNativePoseEngine: AVCaptureVideoDataOutputSampleBufferDelegat
         from connection: AVCaptureConnection
     ) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let width = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
+        let height = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
         let ts = Int(Date().timeIntervalSince1970 * 1000)
         guard let image = try? MPImage(pixelBuffer: pixelBuffer) else { return }
         try? liveLandmarker?.detectAsync(image: image, timestampInMilliseconds: ts)
+        Task { @MainActor in
+            let size = CGSize(width: width, height: height)
+            if self.frameContentSize != size {
+                self.frameContentSize = size
+            }
+        }
     }
 }
 
