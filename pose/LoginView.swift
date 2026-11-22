@@ -23,6 +23,11 @@ struct LoginView: View {
     private enum Field { case username, password }
 
     private let background = Color(red: 0.10, green: 0.10, blue: 0.13)
+    /// 輸入框提示文字：比系統預設 placeholder 更亮，深色底才看得清楚。
+    private let placeholderColor = Color.white.opacity(0.72)
+    private let secondaryLabelColor = Color.white.opacity(0.85)
+    private let fieldIconColor = Color.white.opacity(0.8)
+    private let errorColor = Color(red: 1.0, green: 0.55, blue: 0.55)
 
     var body: some View {
         ZStack {
@@ -42,8 +47,8 @@ struct LoginView: View {
 
                     if let message = auth.errorMessage {
                         Text(message)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(errorColor)
                             .multilineTextAlignment(.center)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -69,7 +74,7 @@ struct LoginView: View {
                 .foregroundStyle(.white)
             Text(mode == .login ? "請登入以開始使用" : "建立新帳號")
                 .font(.subheadline)
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(secondaryLabelColor)
         }
         .padding(.top, 24)
     }
@@ -77,28 +82,38 @@ struct LoginView: View {
     private var credentialFields: some View {
         VStack(spacing: 14) {
             HStack {
-                Image(systemName: "person.fill").foregroundStyle(.white.opacity(0.6))
-                TextField("帳號（至少 3 字元）", text: $username)
+                Image(systemName: "person.fill").foregroundStyle(fieldIconColor)
+                TextField(
+                    "",
+                    text: $username,
+                    prompt: Text("帳號（至少 3 字元）").foregroundStyle(placeholderColor)
+                )
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .submitLabel(.next)
                     .focused($focusedField, equals: .username)
                     .onSubmit { focusedField = .password }
                     .foregroundStyle(.white)
+                    .tint(.cyan)
             }
             .padding(14)
-            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+            .background(.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 12))
 
             HStack {
-                Image(systemName: "lock.fill").foregroundStyle(.white.opacity(0.6))
-                SecureField("密碼（至少 6 字元）", text: $password)
+                Image(systemName: "lock.fill").foregroundStyle(fieldIconColor)
+                SecureField(
+                    "",
+                    text: $password,
+                    prompt: Text("密碼（至少 6 字元）").foregroundStyle(placeholderColor)
+                )
                     .submitLabel(.go)
                     .focused($focusedField, equals: .password)
                     .onSubmit { submit() }
                     .foregroundStyle(.white)
+                    .tint(.cyan)
             }
             .padding(14)
-            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+            .background(.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 12))
         }
     }
 
