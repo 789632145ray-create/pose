@@ -134,8 +134,16 @@ final class AuthManager: ObservableObject {
     private static let tokenAccount = "access_token"
     private static let usernameKey = "saved_username"
     private static let profileKeyPrefix = "user_profile_"
+    /// 新註冊會員：第一次進入主畫面時顯示使用說明。
+    private static let pendingUserGuideKeyPrefix = "pose_pending_user_guide_"
 
     private var token: String?
+
+    /// 目前登入帳號是否尚待顯示首次使用說明。
+    var shouldPresentUserGuide: Bool {
+        guard let username else { return false }
+        return UserDefaults.standard.bool(forKey: Self.pendingUserGuideKey(for: username))
+    }
 
     init() {
         self.token = KeychainHelper.read(Self.tokenAccount)
@@ -172,7 +180,14 @@ final class AuthManager: ObservableObject {
     }
 
     func register(username rawUsername: String, password: String) async {
-        await authenticate(path: "/auth/register", username: rawUsername, password: password)
+        await authenticate(path: "/auth/register", username: rawUsername, password: password, markNewMemberGuide: true)
+    }
+
+    /// 關閉首次使用說明後呼叫，同一帳號之後不再自動跳出。
+    func markUserGuideSeen() {
+        guard let username else { return }
+        UserDefaults.standard.set(false, forKey: Self.pendingUserGuideKey(for: username))
+        objectWillChange.send()
     }
 
     func login(username rawUsername: String, password: String) async {
@@ -321,7 +336,12 @@ final class AuthManager: ObservableObject {
 
     // MARK: 私有
 
-    private func authenticate(path: String, username rawUsername: String, password: String) async {
+    private func authenticate(
+        path: String,
+        username rawUsername: String,
+        password: String,
+        markNewMemberGuide: Bool = false
+    ) async {
         let user = rawUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         errorMessage = nil
 
@@ -339,12 +359,19 @@ final class AuthManager: ObservableObject {
             UserDefaults.standard.set(result.username, forKey: Self.usernameKey)
             isAuthenticated = true
             isOfflineSession = false
+            if markNewMemberGuide {
+                UserDefaults.standard.set(true, forKey: Self.pendingUserGuideKey(for: result.username))
+            }
             await loadUserProfile(token: result.access_token)
         } catch let error as AuthError {
             errorMessage = error.errorDescription
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private static func pendingUserGuideKey(for username: String) -> String {
+        pendingUserGuideKeyPrefix + username
     }
 
     private func loadUserProfile(token: String) async {

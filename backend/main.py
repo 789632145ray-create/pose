@@ -216,12 +216,28 @@ def health_auth() -> dict:
     }
 
 
+def _model_health_payload(engine: str, filename: str) -> dict:
+    bundle = get_model(engine)
+    classes = [int(c) for c in bundle["model"].classes_]
+    cols = bundle.get("feature_columns")
+    n_features = bundle.get("n_features")
+    if not isinstance(n_features, int) and isinstance(cols, list):
+        n_features = len(cols)
+    return {
+        "status": "ok",
+        "model": filename,
+        "classes": classes,
+        "engine": bundle.get("engine") or engine,
+        "feature_version": bundle.get("feature_version"),
+        "n_features": n_features,
+        "classifier": bundle.get("classifier"),
+    }
+
+
 @app.get("/health/model")
 def health_model() -> dict:
     try:
-        bundle = get_model("pose")
-        classes = [int(c) for c in bundle["model"].classes_]
-        return {"status": "ok", "model": "pose_quality_model.joblib", "classes": classes}
+        return _model_health_payload("pose", "pose_quality_model.joblib")
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -231,9 +247,7 @@ def health_model() -> dict:
 @app.get("/health/model/mediapipe")
 def health_mediapipe_model() -> dict:
     try:
-        bundle = get_model("mediapipe")
-        classes = [int(c) for c in bundle["model"].classes_]
-        return {"status": "ok", "model": "mediapipe_quality_model.joblib", "classes": classes}
+        return _model_health_payload("mediapipe", "mediapipe_quality_model.joblib")
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -666,9 +680,10 @@ def get_model(engine: str = "pose") -> dict:
     path = MEDIAPIPE_MODEL_PATH if key == "mediapipe" else MODEL_PATH
     if not os.path.exists(path):
         hint = (
-            "尚未訓練 MediaPipe 模型，請先用 App 標好／壞上傳後執行：python train.py --engine mediapipe"
+            "尚未訓練 MediaPipe 模型。請用 App「MediaPipe」引擎採樣、標好／壞後執行："
+            "python train.py --engine mediapipe（新特徵需重新訓練，舊 210 維 joblib 不相容）"
             if key == "mediapipe"
-            else "尚未訓練模型，請先用 train.py 訓練並產生 pose_quality_model.joblib"
+            else "尚未訓練模型，請先用新版 train.py 訓練並產生 pose_quality_model.joblib"
         )
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=hint)
     bundle = joblib.load(path)
@@ -683,10 +698,9 @@ class PredictIn(BaseModel):
     min_conf: Optional[float] = 0.5
     # 代表性信心：topk（預設）或 peak
     score_mode: Optional[str] = "topk"
-    # 時間窗長度（影格數）；整段過短則只做單次預測再聚合
-    window_size: Optional[int] = 30
-    # 時間窗步長
-    window_stride: Optional[int] = 15
+    # 時間窗長度／步長預設與 train.DEFAULT_WINDOW_* 一致；推論與訓練必須對齊。
+    window_size: Optional[int] = None
+    window_stride: Optional[int] = None
 
 
 class PredictResponse(BaseModel):
@@ -700,35 +714,39 @@ class PredictResponse(BaseModel):
     valid_samples_count: Optional[int] = None
 
 
-def _frame_windows(frames: list, window_size: int, stride: int) -> list[list]:
-    """把影格切成重疊時間窗；影格不足一窗時回傳整段。"""
-    n = len(frames)
-    if n == 0:
-        return []
-    w = max(1, int(window_size))
-    s = max(1, int(stride))
-    if n <= w:
-        return [frames]
-    windows = [frames[i : i + w] for i in range(0, n - w + 1, s)]
-    # 確保尾端有覆蓋。
-    if windows[-1][-1] is not frames[-1]:
-        windows.append(frames[-w:])
-    return windows
+def _expected_feature_count(bundle: dict) -> int:
+    from train import FEATURE_COLUMNS
+
+    cols = bundle.get("feature_columns")
+    if isinstance(cols, list) and cols:
+        return len(cols)
+    n = bundle.get("n_features")
+    if isinstance(n, int) and n > 0:
+        return n
+    return len(FEATURE_COLUMNS)
 
 
-def _predict_windows(model, frame_dicts: list[dict], window_size: int, stride: int) -> list:
+def _predict_windows(model, frame_dicts: list[dict], window_size: int, stride: int, expected_dim: int) -> list:
     import numpy as np
 
-    from train import session_features
+    from train import FEATURE_COLUMNS, frame_windows, session_features
     from video_result_aggregator import FramePrediction
 
-    windows = _frame_windows(frame_dicts, window_size, stride)
+    windows = frame_windows(frame_dicts, window_size=window_size, stride=stride)
     classes = list(model.classes_)
     rows: list[FramePrediction] = []
     for window in windows:
         feats = session_features({"frames": window})
         if feats is None:
             continue
+        if len(feats) != expected_dim:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    f"特徵維度不符：模型期望 {expected_dim}，session_features 產出 {len(feats)}。"
+                    f"請用新版 train.py 重新訓練並重啟後端（目前 FEATURE_COLUMNS={len(FEATURE_COLUMNS)}）。"
+                ),
+            )
         proba = model.predict_proba(np.array([feats], dtype=float))[0]
         p_good = float(proba[classes.index(1)]) if 1 in classes else 0.0
         p_bad = float(proba[classes.index(0)]) if 0 in classes else 0.0
@@ -740,17 +758,28 @@ def _predict_windows(model, frame_dicts: list[dict], window_size: int, stride: i
 
 
 def _predict_with_engine(payload: PredictIn, engine: str) -> PredictResponse:
+    from train import DEFAULT_WINDOW_SIZE, DEFAULT_WINDOW_STRIDE
     from video_result_aggregator import ScoreMode, VideoResultAggregator
 
     bundle = get_model(engine)
     model = bundle["model"]
+    expected_dim = _expected_feature_count(bundle)
 
     frame_dicts = [f.model_dump() for f in payload.frames]
     if not frame_dicts:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="frames 為空，無法預測")
 
-    window_size = int(payload.window_size or 30)
-    stride = int(payload.window_stride or 15)
+    # 優先用請求參數；否則用模型訓練時記錄的窗長；最後退回與 train.py 相同預設。
+    window_size = int(
+        payload.window_size
+        or bundle.get("window_size")
+        or DEFAULT_WINDOW_SIZE
+    )
+    stride = int(
+        payload.window_stride
+        or bundle.get("window_stride")
+        or DEFAULT_WINDOW_STRIDE
+    )
     min_conf = 0.5 if payload.min_conf is None else float(payload.min_conf)
     mode_raw = (payload.score_mode or "topk").strip().lower()
     try:
@@ -758,9 +787,12 @@ def _predict_with_engine(payload: PredictIn, engine: str) -> PredictResponse:
     except ValueError:
         score_mode = ScoreMode.TOP_K
 
-    samples = _predict_windows(model, frame_dicts, window_size, stride)
+    samples = _predict_windows(model, frame_dicts, window_size, stride, expected_dim)
     if not samples:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="frames 為空，無法預測")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="無法從 frames 抽出有效特徵（可能 visibility 過低或缺少核心關節）",
+        )
 
     aggregated = VideoResultAggregator(min_conf=min_conf, score_mode=score_mode).aggregate(samples)
     final_label = aggregated.final_label

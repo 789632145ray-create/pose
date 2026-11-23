@@ -3,9 +3,11 @@
 //  pose
 //
 //  用目前幀的關節座標畫 MediaPipe 風格節點與連線。
-//  QuickPose 的 overlay 圖在切換引擎後可能空白；這層不依賴那張圖。
+//  座標必須依預覽 videoGravity（aspectFill／aspectFit）與影格尺寸做對應，
+//  否則骨架會偏移、壓扁（常見於影片／相機預覽裁切後）。
 //
 
+import AVFoundation
 import SwiftUI
 
 enum MediaPipeSkeletonGraph {
@@ -72,6 +74,12 @@ enum MediaPipeSkeletonGraph {
 struct MediaPipeSkeletonOverlay: View {
     let nodes: [PoseNode]
     var flipHorizontally: Bool
+    /// MediaPipe 實際推理用的影格尺寸（直立後）。為零時退回直接對應 view。
+    var contentSize: CGSize = .zero
+    /// 必須與預覽層 videoGravity 一致。
+    var videoGravity: AVLayerVideoGravity = .resizeAspectFill
+    /// 若來自 AVPlayerLayer.videoRect（非空），優先用它對位，最準。
+    var displayRect: CGRect = .zero
 
     var body: some View {
         Canvas { context, size in
@@ -101,8 +109,42 @@ struct MediaPipeSkeletonOverlay: View {
         .allowsHitTesting(false)
     }
 
-    private func point(_ node: PoseNode, in size: CGSize) -> CGPoint {
-        let x = flipHorizontally ? 1 - node.x : node.x
-        return CGPoint(x: x * size.width, y: node.y * size.height)
+    private func point(_ node: PoseNode, in viewSize: CGSize) -> CGPoint {
+        let nx = flipHorizontally ? 1 - node.x : node.x
+        let ny = node.y
+        let fitted: CGRect
+        if displayRect.width > 1, displayRect.height > 1 {
+            fitted = displayRect
+        } else {
+            let content = (contentSize.width > 1 && contentSize.height > 1) ? contentSize : viewSize
+            fitted = Self.fittedRect(content: content, in: viewSize, gravity: videoGravity)
+        }
+        return CGPoint(
+            x: fitted.minX + nx * fitted.width,
+            y: fitted.minY + ny * fitted.height
+        )
+    }
+
+    /// 將影格矩形依 gravity 對應到 view（與 AVCaptureVideoPreviewLayer／AVPlayerLayer 一致）。
+    static func fittedRect(content: CGSize, in view: CGSize, gravity: AVLayerVideoGravity) -> CGRect {
+        guard content.width > 0, content.height > 0, view.width > 0, view.height > 0 else {
+            return CGRect(origin: .zero, size: view)
+        }
+        let scale: CGFloat
+        switch gravity {
+        case .resizeAspectFill:
+            scale = max(view.width / content.width, view.height / content.height)
+        case .resizeAspect:
+            scale = min(view.width / content.width, view.height / content.height)
+        default:
+            return CGRect(origin: .zero, size: view)
+        }
+        let draw = CGSize(width: content.width * scale, height: content.height * scale)
+        return CGRect(
+            x: (view.width - draw.width) / 2,
+            y: (view.height - draw.height) / 2,
+            width: draw.width,
+            height: draw.height
+        )
     }
 }

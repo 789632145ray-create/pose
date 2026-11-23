@@ -13,6 +13,7 @@
 		770DED0E2F8EDB0700A83827 /* QuickPoseSwiftUI in Frameworks */ = {isa = PBXBuildFile; productRef = 770DED0D2F8EDB0700A83827 /* QuickPoseSwiftUI */; };
 		770DED122F8EDB0700A83827 /* RealmSwift in Frameworks */ = {isa = PBXBuildFile; productRef = 770DED112F8EDB0700A83827 /* RealmSwift */; };
 		770DED132F8EDB0700A83827 /* RealmSwift in Embed Frameworks */ = {isa = PBXBuildFile; productRef = 770DED112F8EDB0700A83827 /* RealmSwift */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		B192MEDP01F8EDB0700A83827 /* MediaPipeTasksVision in Frameworks */ = {isa = PBXBuildFile; productRef = B192MEDP02F8EDB0700A83827 /* MediaPipeTasksVision */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -93,6 +94,7 @@
 				770DED082F8EDB0700A83827 /* QuickPoseCamera in Frameworks */,
 				770DED0E2F8EDB0700A83827 /* QuickPoseSwiftUI in Frameworks */,
 				770DED122F8EDB0700A83827 /* RealmSwift in Frameworks */,
+				B192MEDP01F8EDB0700A83827 /* MediaPipeTasksVision in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -159,6 +161,7 @@
 				770DED0B2F8EDB0700A83827 /* QuickPoseMP-full */,
 				770DED0D2F8EDB0700A83827 /* QuickPoseSwiftUI */,
 				770DED112F8EDB0700A83827 /* RealmSwift */,
+				B192MEDP02F8EDB0700A83827 /* MediaPipeTasksVision */,
 			);
 			productName = pose;
 			productReference = 770DECD22F8ED94600A83827 /* pose.app */;
@@ -245,6 +248,7 @@
 			packageReferences = (
 				770DED062F8EDB0700A83827 /* XCRemoteSwiftPackageReference "quickpose-ios-sdk" */,
 				770DED102F8EDB0700A83827 /* XCRemoteSwiftPackageReference "realm-swift" */,
+				B192MEDP03F8EDB0700A83827 /* XCRemoteSwiftPackageReference "mediapipe" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 770DECD32F8ED94600A83827 /* Products */;
@@ -647,6 +651,14 @@
 				minimumVersion = 10.44.0;
 			};
 		};
+		B192MEDP03F8EDB0700A83827 /* XCRemoteSwiftPackageReference "mediapipe" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/google-ai-edge/mediapipe";
+			requirement = {
+				kind = branch;
+				branch = master;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -674,6 +686,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 770DED102F8EDB0700A83827 /* XCRemoteSwiftPackageReference "realm-swift" */;
 			productName = RealmSwift;
+		};
+		B192MEDP02F8EDB0700A83827 /* MediaPipeTasksVision */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B192MEDP03F8EDB0700A83827 /* XCRemoteSwiftPackageReference "mediapipe" */;
+			productName = MediaPipeTasksVision;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

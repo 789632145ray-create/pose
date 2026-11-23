@@ -77,8 +77,9 @@ source .venv/bin/activate
 
 # 方式 A：連 Railway 同一個 Atlas（必須複製完整字串，不要用 mongodb+srv://...）
 export POSE_MONGO_URL="mongodb+srv://使用者:密碼@cluster0.xxxx.mongodb.net/"
-python train.py --engine mediapipe          # mediapipe_quality_model.joblib
+python train.py --engine mediapipe          # 需先用 App「MediaPipe」引擎原生採樣並標好／壞
 python train.py                             # pose_quality_model.joblib
+# 產出 mediapipe_quality_model.joblib 後再 COPY／上傳到 Railway 容器
 
 # 方式 B：App 資料庫「匯出 JSON」傳到 Mac
 python train.py --engine mediapipe --from-json mediapipe_training_export.json
