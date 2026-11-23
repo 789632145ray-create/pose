@@ -216,12 +216,28 @@ def health_auth() -> dict:
     }
 
 
+def _model_health_payload(engine: str, filename: str) -> dict:
+    bundle = get_model(engine)
+    classes = [int(c) for c in bundle["model"].classes_]
+    cols = bundle.get("feature_columns")
+    n_features = bundle.get("n_features")
+    if not isinstance(n_features, int) and isinstance(cols, list):
+        n_features = len(cols)
+    return {
+        "status": "ok",
+        "model": filename,
+        "classes": classes,
+        "engine": bundle.get("engine") or engine,
+        "feature_version": bundle.get("feature_version"),
+        "n_features": n_features,
+        "classifier": bundle.get("classifier"),
+    }
+
+
 @app.get("/health/model")
 def health_model() -> dict:
     try:
-        bundle = get_model("pose")
-        classes = [int(c) for c in bundle["model"].classes_]
-        return {"status": "ok", "model": "pose_quality_model.joblib", "classes": classes}
+        return _model_health_payload("pose", "pose_quality_model.joblib")
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -231,9 +247,7 @@ def health_model() -> dict:
 @app.get("/health/model/mediapipe")
 def health_mediapipe_model() -> dict:
     try:
-        bundle = get_model("mediapipe")
-        classes = [int(c) for c in bundle["model"].classes_]
-        return {"status": "ok", "model": "mediapipe_quality_model.joblib", "classes": classes}
+        return _model_health_payload("mediapipe", "mediapipe_quality_model.joblib")
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
