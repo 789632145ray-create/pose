@@ -380,4 +380,75 @@ final class poseTests: XCTestCase {
         XCTAssertEqual(PoseAssessmentEngine.resolved(fromStored: "mediapipe"), .mediaPipe)
         XCTAssertEqual(PoseAssessmentEngine.resolved(fromStored: "unknown"), .trainedModel)
     }
+
+    /// 合成「先降後升再回落」的腳踝 y；`nil` 側維持平線，避免誤觸。
+    private func feedAnklePeak(
+        _ detector: PerFootStepDetector,
+        left: (valley: Double, peak: Double)?,
+        right: (valley: Double, peak: Double)?,
+        base: Double = 0.40
+    ) -> [StepEvent] {
+        func sample(_ foot: (valley: Double, peak: Double)?, phase: Int) -> Double {
+            guard let foot else { return base }
+            switch phase {
+            case 0: return base
+            case 1: return foot.valley
+            case 2: return foot.valley + 0.005
+            case 3: return foot.peak
+            default: return foot.peak - 0.02
+            }
+        }
+        var last: [StepEvent] = []
+        for phase in 0...4 {
+            last = detector.ingest(
+                leftAnkleY: sample(left, phase: phase),
+                rightAnkleY: sample(right, phase: phase)
+            )
+        }
+        return last
+    }
+
+    /// 左腳大振幅擺動時，右腳若只有連帶小峰，不應同時加右步。
+    func testStepDetectorIgnoresWeakerOppositePeakSameFrame() {
+        let detector = PerFootStepDetector(
+            minPeakDistanceFrames: 3,
+            minGlobalPeakDistanceFrames: 2,
+            crossSideSuppressFrames: 4,
+            minSameSideDistanceFrames: 12,
+            minPeakValleyDelta: 0.02
+        )
+        let events = feedAnklePeak(
+            detector,
+            left: (valley: 0.32, peak: 0.48),   // Δ 0.16
+            right: (valley: 0.38, peak: 0.42)   // Δ 0.04 連帶小峰
+        )
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.side, .left)
+        XCTAssertEqual(detector.leftSteps, 1)
+        XCTAssertEqual(detector.rightSteps, 0)
+    }
+
+    /// 左右交替的真實步伐仍可分別計數。
+    func testStepDetectorAcceptsAlternatingSteps() {
+        let detector = PerFootStepDetector(
+            minPeakDistanceFrames: 3,
+            minGlobalPeakDistanceFrames: 2,
+            crossSideSuppressFrames: 3,
+            minSameSideDistanceFrames: 12,
+            minPeakValleyDelta: 0.02
+        )
+        func afterGap() {
+            for _ in 0..<6 {
+                _ = detector.ingest(leftAnkleY: 0.40, rightAnkleY: 0.40)
+            }
+        }
+        _ = feedAnklePeak(detector, left: (0.32, 0.48), right: nil)
+        afterGap()
+        _ = feedAnklePeak(detector, left: nil, right: (0.32, 0.48))
+        afterGap()
+        _ = feedAnklePeak(detector, left: (0.32, 0.48), right: nil)
+        XCTAssertEqual(detector.leftSteps, 2)
+        XCTAssertEqual(detector.rightSteps, 1)
+        XCTAssertEqual(detector.totalSteps, 3)
+    }
 }
