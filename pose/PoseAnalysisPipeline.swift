@@ -5,7 +5,7 @@
 //  逐步（每一步）偵測管線：
 //  1) 5 幀移動平均低通（穩定關鍵點 y 值，抑制抖動造成的偽步）
 //  2) 以骨盆中心為原點的相對座標（人移動位置時不影響步偵測）
-//  3) 左右腳「腳踝 y」獨立做峰／谷偵測，每個合格峰 = 一步事件
+//  3) 左右腳「腳踝 y」峰／谷偵測；同幀／短間隔以振幅仲裁，並偏好左右交替，避免一腳擺動時對側誤加步
 //
 
 import Foundation
@@ -135,7 +135,7 @@ struct StepEvent: Identifiable, Equatable {
     }
 }
 
-// MARK: - 左右腳獨立的「每一步」偵測
+// MARK: - 左右腳「每一步」偵測（含對側誤觸抑制）
 
 final class PerFootStepDetector {
     private struct FootState {
@@ -143,6 +143,12 @@ final class PerFootStepDetector {
         var lastValleyValue: Double? = nil
         var lastPeakFrameIndex: Int = -10_000
         var frameCounter: Int = 0
+    }
+
+    private struct PeakCandidate {
+        var side: PoseFootSide
+        var amplitude: Double
+        var peakFrame: Int
     }
 
     private(set) var leftSteps: Int = 0
@@ -155,17 +161,35 @@ final class PerFootStepDetector {
     private var leftState = FootState()
     private var rightState = FootState()
     private var lastEventTime: Date?
+    private var lastAcceptedSide: PoseFootSide?
+    private var lastAcceptedGlobalFrame: Int = -10_000
+    private var globalFrame: Int = 0
     private var globalIndex = 0
 
-    /// 連續同腳兩個峰的最少間隔幀數（30FPS 下約 8 ≈ 0.27s，避免抖動雙計）。
+    /// 同腳兩峰最少間隔幀數（30FPS 下約 8 ≈ 0.27s）。
     private let minPeakDistanceFrames: Int
-    /// 從谷到峰最小振幅（已骨盆歸一的 y 範圍 ~ 0.45 上下）。
+    /// 任一腳被接受後，全域最短再接受間隔（抑制同幀／對側連帶假峰）。
+    private let minGlobalPeakDistanceFrames: Int
+    /// 接受一步後短暫壓制對側，避免「左腳擺動、右腳也加步」。
+    private let crossSideSuppressFrames: Int
+    /// 同側連續兩步的最短間隔（跛行等例外才放寬；正常應左右交替）。
+    private let minSameSideDistanceFrames: Int
+    /// 從谷到峰最小振幅（骨盆歸一 y）。
     private let minPeakValleyDelta: Double
     private let maxHistory: Int = 60
     private let maxRecentEvents: Int = 30
 
-    init(minPeakDistanceFrames: Int = 8, minPeakValleyDelta: Double = 0.020) {
+    init(
+        minPeakDistanceFrames: Int = 8,
+        minGlobalPeakDistanceFrames: Int = 6,
+        crossSideSuppressFrames: Int = 7,
+        minSameSideDistanceFrames: Int = 18,
+        minPeakValleyDelta: Double = 0.028
+    ) {
         self.minPeakDistanceFrames = minPeakDistanceFrames
+        self.minGlobalPeakDistanceFrames = minGlobalPeakDistanceFrames
+        self.crossSideSuppressFrames = crossSideSuppressFrames
+        self.minSameSideDistanceFrames = minSameSideDistanceFrames
         self.minPeakValleyDelta = minPeakValleyDelta
     }
 
@@ -173,32 +197,91 @@ final class PerFootStepDetector {
         leftState = FootState()
         rightState = FootState()
         lastEventTime = nil
+        lastAcceptedSide = nil
+        lastAcceptedGlobalFrame = -10_000
+        globalFrame = 0
         globalIndex = 0
         leftSteps = 0
         rightSteps = 0
         recentEvents.removeAll(keepingCapacity: true)
     }
 
-    /// 每幀以「已骨盆歸一的左／右腳踝 y」推進；若該腳本幀完成一步，回傳事件。
+    /// 每幀以「已骨盆歸一的左／右腳踝 y」推進；同幀雙峰只保留振幅較大側。
     @discardableResult
     func ingest(leftAnkleY: Double?, rightAnkleY: Double?, now: Date = Date()) -> [StepEvent] {
-        var emitted: [StepEvent] = []
-        if let y = leftAnkleY, let e = process(y: y, side: .left, state: &leftState, now: now) {
+        globalFrame += 1
+
+        var leftCandidate: PeakCandidate?
+        var rightCandidate: PeakCandidate?
+        if let y = leftAnkleY {
+            leftCandidate = detectPeak(y: y, side: .left, state: &leftState)
+        }
+        if let y = rightAnkleY {
+            rightCandidate = detectPeak(y: y, side: .right, state: &rightState)
+        }
+
+        let chosen: PeakCandidate?
+        switch (leftCandidate, rightCandidate) {
+        case let (l?, r?):
+            // 同幀兩腳都像一步：只算振幅較大的那一腳，避免對側連帶加步。
+            chosen = l.amplitude >= r.amplitude ? l : r
+        case let (l?, nil):
+            chosen = l
+        case let (nil, r?):
+            chosen = r
+        case (nil, nil):
+            chosen = nil
+        }
+
+        guard let candidate = chosen, shouldAccept(candidate) else { return [] }
+
+        // 確認接受後才鎖定該腳的峰索引，避免被拒的假峰吃掉後續真實步。
+        switch candidate.side {
+        case .left:
+            leftState.lastPeakFrameIndex = candidate.peakFrame
+            leftState.lastValleyValue = nil
             leftSteps += 1
-            emitted.append(e)
-        }
-        if let y = rightAnkleY, let e = process(y: y, side: .right, state: &rightState, now: now) {
+        case .right:
+            rightState.lastPeakFrameIndex = candidate.peakFrame
+            rightState.lastValleyValue = nil
             rightSteps += 1
-            emitted.append(e)
         }
-        for e in emitted {
-            recentEvents.append(e)
-            if recentEvents.count > maxRecentEvents { recentEvents.removeFirst() }
-        }
-        return emitted
+
+        lastAcceptedSide = candidate.side
+        lastAcceptedGlobalFrame = globalFrame
+        globalIndex += 1
+        let interval = lastEventTime.map { now.timeIntervalSince($0) }
+        lastEventTime = now
+        let event = StepEvent(
+            id: UUID(),
+            index: globalIndex,
+            side: candidate.side,
+            timestamp: now,
+            intervalFromPrevious: interval
+        )
+        recentEvents.append(event)
+        if recentEvents.count > maxRecentEvents { recentEvents.removeFirst() }
+        return [event]
     }
 
-    private func process(y: Double, side: PoseFootSide, state: inout FootState, now: Date) -> StepEvent? {
+    private func shouldAccept(_ candidate: PeakCandidate) -> Bool {
+        let sinceGlobal = globalFrame - lastAcceptedGlobalFrame
+        guard sinceGlobal >= minGlobalPeakDistanceFrames else { return false }
+
+        if let last = lastAcceptedSide {
+            if last == candidate.side {
+                // 正常步態應左右交替；同側連計需明顯更長間隔（例如跛行）。
+                guard sinceGlobal >= minSameSideDistanceFrames else { return false }
+            } else if sinceGlobal < crossSideSuppressFrames {
+                // 對側在極短時間內的峰多半是連帶抖動，不是下一步。
+                return false
+            }
+        }
+        return true
+    }
+
+    /// 偵測峰候選；不寫入 lastPeak／不清 valley，等 ingest 仲裁接受後再鎖定。
+    private func detectPeak(y: Double, side: PoseFootSide, state: inout FootState) -> PeakCandidate? {
         state.frameCounter += 1
         state.series.append(y)
         if state.series.count > maxHistory { state.series.removeFirst() }
@@ -219,21 +302,11 @@ final class PerFootStepDetector {
         guard isPeakAtMid else { return nil }
         let peakFrame = state.frameCounter - 1
         guard peakFrame - state.lastPeakFrameIndex >= minPeakDistanceFrames else { return nil }
-        guard let valley = state.lastValleyValue, (y1 - valley) >= minPeakValleyDelta else { return nil }
+        guard let valley = state.lastValleyValue else { return nil }
+        let amplitude = y1 - valley
+        guard amplitude >= minPeakValleyDelta else { return nil }
 
-        state.lastPeakFrameIndex = peakFrame
-        state.lastValleyValue = nil
-
-        globalIndex += 1
-        let interval = lastEventTime.map { now.timeIntervalSince($0) }
-        lastEventTime = now
-        return StepEvent(
-            id: UUID(),
-            index: globalIndex,
-            side: side,
-            timestamp: now,
-            intervalFromPrevious: interval
-        )
+        return PeakCandidate(side: side, amplitude: amplitude, peakFrame: peakFrame)
     }
 }
 
